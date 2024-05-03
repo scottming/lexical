@@ -1,10 +1,9 @@
 defmodule Lexical.RemoteControl.Commands.Rename do
-  @moduledoc """
-  We are unable to accurately determine the process of renaming,
-  because after the rename, there will be a series of operations such as
-  `DidChange`, `DidSave`, etc., which will trigger expensive actions like compiling the entire project.
-  Therefore, we need this module to make some markings to determine whether it is currently in the process of renaming.
-  """
+  # We are unable to accurately determine when the rename process finishes,
+  # because after the rename, we will receive a series of events like
+  # `DidChange`, `DidSave`, etc., which will trigger expensive actions like compiling the entire project.
+  # Therefore, we need this module to tell us if lexical is currently in the process of renaming.
+
   defmodule State do
     defstruct uri_with_expected_operation: %{}, on_update_progess: nil, on_complete: nil
 

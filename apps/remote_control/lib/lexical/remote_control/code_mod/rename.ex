@@ -14,13 +14,13 @@ defmodule Lexical.RemoteControl.CodeMod.Rename do
           {:ok, {atom(), String.t()}, Range.t()} | {:error, term()}
   defdelegate prepare(analysis, position), to: Rename.Prepare
 
-  @rename_mapping %{module: Rename.Module}
+  @rename_mappings %{module: Rename.Module}
 
   @spec rename(Analysis.t(), Position.t(), String.t(), String.t() | nil) ::
           {:ok, [Document.Changes.t()]} | {:error, term()}
   def rename(%Analysis{} = analysis, %Position{} = position, new_name, client_name) do
     with {:ok, {renamable, entity}, range} <- Rename.Prepare.resolve(analysis, position) do
-      rename_module = @rename_mapping[renamable]
+      rename_module = Map.fetch!(@rename_mappings, renamable)
       results = rename_module.rename(range, new_name, entity)
       set_rename_progress(results, client_name)
       {:ok, results}
