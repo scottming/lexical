@@ -4,7 +4,8 @@ defmodule Lexical.RemoteControl.Commands.Rename do
   # `DidChange`, `DidSave`, etc., which will trigger expensive actions like compiling the entire project.
   # Therefore, we need this module to tell us if lexical is currently in the process of renaming.
 
-  import Lexical.RemoteControl.Api.Messages
+  alias Lexical.RemoteControl.Api.Messages
+  import Messages
 
   defmodule State do
     defstruct uri_with_expected_operation: %{}, on_update_progess: nil, on_complete: nil
@@ -59,8 +60,6 @@ defmodule Lexical.RemoteControl.Commands.Rename do
     end
   end
 
-  alias Lexical.RemoteControl
-
   use GenServer
 
   def start_link(_) do
@@ -69,11 +68,13 @@ defmodule Lexical.RemoteControl.Commands.Rename do
 
   @impl true
   def init(state) do
-    RemoteControl.Dispatch.register_listener(self(), [file_changed(), file_saved()])
     {:ok, state}
   end
 
-  @spec set_rename_progress(%{Lexical.uri() => atom()}, tuple()) :: :ok
+  @spec set_rename_progress(
+          %{Lexical.uri() => Messages.file_changed() | Messages.file_saved()},
+          {function(), function()}
+        ) :: :ok
   def set_rename_progress(uri_with_expected_operation, progress_functions) do
     GenServer.cast(
       __MODULE__,
@@ -85,13 +86,22 @@ defmodule Lexical.RemoteControl.Commands.Rename do
     GenServer.call(__MODULE__, :in_progress?)
   end
 
+  @spec update_progress(Messages.file_changed() | Messages.file_saved()) :: :ok
+  # NOTE:
+  # This GenServer cannot simply subscribe to messages and then update the rename status.
+  # Instead, it should call this function to synchronously update the status,
+  # thus preventing failures due to latency issues.
+  def update_progress(message) do
+    GenServer.cast(__MODULE__, {:update_progress, message})
+  end
+
   @impl true
   def handle_call(:in_progress?, _from, state) do
     {:reply, State.in_progress?(state), state}
   end
 
   @impl true
-  def handle_info(message, %State{} = state) do
+  def handle_cast({:update_progress, message}, state) do
     new_state = State.update_progress(state, message)
     {:noreply, new_state}
   end

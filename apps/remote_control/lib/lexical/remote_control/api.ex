@@ -16,12 +16,16 @@ defmodule Lexical.RemoteControl.Api do
   defdelegate schedule_compile(project, force?), to: Build
   defdelegate compile_document(project, document), to: Build
 
-  def maybe_schedule_compile(project) do
-    RemoteControl.call(project, Build, :maybe_schedule_compile, [])
+  def maybe_schedule_compile(project, triggered_message) do
+    RemoteControl.call(project, Build, :maybe_schedule_compile, [triggered_message])
   end
 
-  def maybe_compile_document(project, document) do
-    RemoteControl.call(project, Build, :maybe_compile_document, [project, document])
+  def maybe_compile_document(project, document, updated_message) do
+    RemoteControl.call(project, Build, :maybe_compile_document, [
+      project,
+      document,
+      updated_message
+    ])
   end
 
   def expand_alias(

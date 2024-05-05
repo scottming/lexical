@@ -1,6 +1,5 @@
 defmodule Lexical.RemoteControl.Commands.RenameTest do
   alias Lexical.RemoteControl.Commands.Rename
-  alias Lexical.RemoteControl.Dispatch
 
   import Lexical.RemoteControl.Api.Messages
 
@@ -8,7 +7,6 @@ defmodule Lexical.RemoteControl.Commands.RenameTest do
   use Patch
 
   setup do
-    start_supervised!(Dispatch)
     start_supervised!(Rename)
     pid = self()
 
@@ -33,7 +31,7 @@ defmodule Lexical.RemoteControl.Commands.RenameTest do
     file_uri = "file://file.ex"
 
     Rename.set_rename_progress(%{file_uri => file_saved(uri: file_uri)}, progress_funcs)
-    Dispatch.broadcast(file_saved(uri: file_uri))
+    Rename.update_progress(file_saved(uri: file_uri))
 
     assert_receive {:update_progress, 1, ""}
     assert_receive :complete_progress
@@ -52,7 +50,7 @@ defmodule Lexical.RemoteControl.Commands.RenameTest do
       progress_funcs
     )
 
-    Dispatch.broadcast(file_changed(uri: uri1))
+    Rename.update_progress(file_changed(uri: uri1))
 
     assert_receive {:update_progress, 1, ""}
 
