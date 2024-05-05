@@ -4,6 +4,8 @@ defmodule Lexical.RemoteControl.Commands.Rename do
   # `DidChange`, `DidSave`, etc., which will trigger expensive actions like compiling the entire project.
   # Therefore, we need this module to tell us if lexical is currently in the process of renaming.
 
+  import Lexical.RemoteControl.Api.Messages
+
   defmodule State do
     defstruct uri_with_expected_operation: %{}, on_update_progess: nil, on_complete: nil
 
@@ -17,12 +19,20 @@ defmodule Lexical.RemoteControl.Commands.Rename do
       }
     end
 
-    def update_progress(%__MODULE__{} = state, uri, operation_message) do
+    def update_progress(%__MODULE__{} = state, file_changed(uri: uri)) do
+      update_progress(state, uri, file_changed(uri: uri))
+    end
+
+    def update_progress(%__MODULE__{} = state, file_saved(uri: uri)) do
+      update_progress(state, uri, file_saved(uri: uri))
+    end
+
+    defp update_progress(%__MODULE__{} = state, uri, message) do
       new_uri_with_expected_operation =
         maybe_pop_expected_operation(
           state.uri_with_expected_operation,
           uri,
-          operation_message,
+          message,
           state.on_update_progess
         )
 
@@ -37,10 +47,10 @@ defmodule Lexical.RemoteControl.Commands.Rename do
       state.uri_with_expected_operation != %{}
     end
 
-    def maybe_pop_expected_operation(uri_to_operation, uri, %operation{}, on_update_progess) do
+    def maybe_pop_expected_operation(uri_to_operation, uri, message, on_update_progess) do
       case uri_to_operation do
-        %{^uri => ^operation} ->
-          on_update_progess.(1, "Renaming")
+        %{^uri => ^message} ->
+          on_update_progess.(1, "")
           Map.delete(uri_to_operation, uri)
 
         _ ->
@@ -48,6 +58,8 @@ defmodule Lexical.RemoteControl.Commands.Rename do
       end
     end
   end
+
+  alias Lexical.RemoteControl
 
   use GenServer
 
@@ -57,6 +69,7 @@ defmodule Lexical.RemoteControl.Commands.Rename do
 
   @impl true
   def init(state) do
+    RemoteControl.Dispatch.register_listener(self(), [file_changed(), file_saved()])
     {:ok, state}
   end
 
@@ -66,10 +79,6 @@ defmodule Lexical.RemoteControl.Commands.Rename do
       __MODULE__,
       {:set_rename_progress, uri_with_expected_operation, progress_functions}
     )
-  end
-
-  def update_progress(uri, operation_message) do
-    GenServer.cast(__MODULE__, {:update_progress, uri, operation_message})
   end
 
   def in_progress? do
@@ -82,14 +91,14 @@ defmodule Lexical.RemoteControl.Commands.Rename do
   end
 
   @impl true
-  def handle_cast({:set_rename_progress, uri_with_expected_operation, progress_functions}, _state) do
-    new_state = State.new(uri_with_expected_operation, progress_functions)
+  def handle_info(message, %State{} = state) do
+    new_state = State.update_progress(state, message)
     {:noreply, new_state}
   end
 
   @impl true
-  def handle_cast({:update_progress, uri, message}, state) do
-    new_state = State.update_progress(state, uri, message)
+  def handle_cast({:set_rename_progress, uri_with_expected_operation, progress_functions}, _state) do
+    new_state = State.new(uri_with_expected_operation, progress_functions)
     {:noreply, new_state}
   end
 end

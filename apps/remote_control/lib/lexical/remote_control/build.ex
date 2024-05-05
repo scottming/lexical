@@ -36,18 +36,14 @@ defmodule Lexical.RemoteControl.Build do
     :ok
   end
 
-  def maybe_schedule_compile(triggered_file_uri, message) do
-    if Rename.in_progress?() do
-      Rename.update_progress(triggered_file_uri, message)
-    else
+  def maybe_schedule_compile do
+    unless Rename.in_progress?() do
       GenServer.cast(__MODULE__, {:compile, false})
     end
   end
 
-  def maybe_compile_document(%Project{} = project, %Document{} = document, message) do
-    if Rename.in_progress?() do
-      Rename.update_progress(document.uri, message)
-    else
+  def maybe_compile_document(%Project{} = project, %Document{} = document) do
+    unless Rename.in_progress?() do
       compile_document(project, document)
     end
   end

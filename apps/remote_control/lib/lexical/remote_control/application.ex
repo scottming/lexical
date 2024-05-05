@@ -14,9 +14,9 @@ defmodule Lexical.RemoteControl.Application do
       if RemoteControl.project_node?() do
         [
           {RemoteControl.Commands.Reindex, nil},
-          RemoteControl.Commands.Rename,
           RemoteControl.Module.Loader,
           {RemoteControl.Dispatch, progress: true},
+          RemoteControl.Commands.Rename,
           RemoteControl.ModuleMappings,
           RemoteControl.Build,
           RemoteControl.Build.CaptureServer,
