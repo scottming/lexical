@@ -213,6 +213,42 @@ defmodule Lexical.RemoteControl.CodeMod.RenameTest do
 
       assert result =~ ~S[defmodule FooTest do]
     end
+
+    test "it shouldn't rename the reference module if the module only contains single segment" do
+      {:ok, result} =
+        ~q[
+        defmodule |TopLevel.Ast do
+        end
+
+        defmodule TopLevel.Another do
+          alias TopLevel.Ast
+
+          Ast.call() # no change
+        end
+      ] |> rename("TopLevel.Middle.Ast")
+
+      assert result =~ ~S[defmodule TopLevel.Middle.Ast do]
+      assert result =~ ~S[alias TopLevel.Middle.Ast]
+      assert result =~ ~S[ Ast.call() # no change]
+    end
+
+    test "it shouldn't rename the reference module if the only change the prefix" do
+      {:ok, result} =
+        ~q[
+        defmodule |Foo.Bar.Utils do
+        end
+
+        defmodule TopLevel.Another do
+          alias Foo.Bar.Utils
+
+          Utils.blah() # no change
+        end
+      ] |> rename("Quux.Utils")
+
+      assert result =~ ~S[defmodule Quux.Utils do]
+      assert result =~ ~S[alias Quux.Utils]
+      assert result =~ ~S[ Utils.blah() # no change]
+    end
   end
 
   describe "rename module descendants" do
