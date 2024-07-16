@@ -9,6 +9,7 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
   alias Lexical.Formats
   alias Lexical.RemoteControl.CodeIntelligence.Entity
   alias Lexical.RemoteControl.CodeMod.Rename
+  alias Lexical.RemoteControl.CodeMod.Rename.Entry
   alias Lexical.RemoteControl.Search.Store
   require Logger
 
@@ -123,7 +124,7 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
     module_string = Formats.module(module)
 
     case Store.exact(module_string, type: :module) do
-      {:ok, entries} -> entries
+      {:ok, entries} -> Enum.map(entries, &Entry.new/1)
       {:error, _} -> []
     end
   end
@@ -133,7 +134,7 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
     prefix = "#{module_string}."
 
     case Store.prefix(prefix, type: :module) do
-      {:ok, entries} -> entries
+      {:ok, entries} -> Enum.map(entries, &Entry.new/1)
       {:error, _} -> []
     end
   end
@@ -150,26 +151,26 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
   end
 
   defp has_dots_in_range?(entry) do
-    entry.range |> range_text() |> String.contains?(".")
+    entry.edit_range |> range_text() |> String.contains?(".")
   end
 
   defp adjust_range_for_exacts(entries, old_suffix) do
     old_suffix_length = String.length(old_suffix)
 
-    for entry <- entries do
-      start_character = entry.range.end.character - old_suffix_length
-      put_in(entry.range.start.character, start_character)
+    for %Entry{} = entry <- entries do
+      start_character = entry.edit_range.end.character - old_suffix_length
+      put_in(entry.edit_range.start.character, start_character)
     end
   end
 
   defp adjust_range_for_descendants(entries, module, old_suffix) do
-    for entry <- entries,
-        range_text = range_text(entry.range),
+    for %Entry{} = entry <- entries,
+        range_text = range_text(entry.edit_range),
         matches = matches(range_text, old_suffix),
         result = resolve_module_range(entry, module, matches),
         match?({:ok, _}, result) do
       {_, range} = result
-      %{entry | range: range}
+      %{entry | edit_range: range}
     end
   end
 
@@ -183,7 +184,7 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
   end
 
   defp resolve_module_range(entry, module, [[{start, length}]]) do
-    range = adjust_range_characters(entry.range, {start, length})
+    range = adjust_range_characters(entry.edit_range, {start, length})
 
     with {:ok, {:module, ^module}, _} <- resolve(entry.path, range.start) do
       {:ok, range}
@@ -195,8 +196,8 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
     # For example, if we have a module named `Foo.Bar.Foo.Bar` and we want to rename it to `Foo.Bar.Baz`
     # The `Foo.Bar` will be duplicated in the range text, so we need to resolve the correct range
     # and only rename the second occurrence of `Foo.Bar`
-    start_character = entry.range.start.character + start
-    position = %{entry.range.start | character: start_character}
+    start_character = entry.edit_range.start.character + start
+    position = %{entry.edit_range.start | character: start_character}
 
     with {:ok, {:module, result}, range} <- resolve(entry.path, position) do
       if result == module do
@@ -230,7 +231,7 @@ defmodule Lexical.RemoteControl.CodeMod.Rename.Module do
   end
 
   defp to_document_changes(uri, entries, new_suffix) do
-    edits = Enum.map(entries, &Edit.new(new_suffix, &1.range))
+    edits = Enum.map(entries, &Edit.new(new_suffix, &1.edit_range))
 
     with {:ok, document} <- Document.Store.open_temporary(uri) do
       rename_file = maybe_rename_file(document, entries, new_suffix)
