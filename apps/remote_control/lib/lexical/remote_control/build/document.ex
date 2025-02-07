@@ -4,7 +4,16 @@ defmodule Lexical.RemoteControl.Build.Document do
   alias Lexical.RemoteControl.Build.Document.Compilers
   alias Lexical.RemoteControl.Build.Isolation
 
-  @compilers [Compilers.Config, Compilers.Elixir, Compilers.EEx, Compilers.HEEx, Compilers.NoOp]
+  require Logger
+
+  @compilers [
+    Compilers.Config,
+    Compilers.Elixir,
+    Compilers.EEx,
+    Compilers.HEEx,
+    Compilers.Seex,
+    Compilers.NoOp
+  ]
 
   def compile(%Document{} = document) do
     compiler = Enum.find(@compilers, & &1.recognizes?(document))
@@ -15,6 +24,7 @@ defmodule Lexical.RemoteControl.Build.Document do
         result
 
       {:error, {exception, stack}} ->
+        Logger.error("Failed to compile document: #{document.path}, exception: #{exception}")
         diagnostic = Build.Error.error_to_diagnostic(document, exception, stack, nil)
         diagnostics = Build.Error.refine_diagnostics([diagnostic])
         {:error, diagnostics}

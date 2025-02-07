@@ -42,16 +42,23 @@ defmodule Lexical.Server.IEx.Helpers do
     |> Project.node_name()
   end
 
-  def doc(project, text) do
-    root_path =
-      project
-      |> project()
-      |> Project.root_path()
+  def doc(%Project{} = project, text_or_path) do
+    if File.exists?(text_or_path) do
+      uri = Document.Path.to_uri(text_or_path)
+      text = File.read!(text_or_path)
+      Document.new(uri, text, 0)
+    else
+      root_path = Project.root_path(project)
 
-    [root_path, "lib", "file.ex"]
-    |> Path.join()
-    |> Document.Path.to_uri()
-    |> Document.new(text, 0)
+      [root_path, "lib", "file.ex"]
+      |> Path.join()
+      |> Document.Path.to_uri()
+      |> Document.new(text_or_path, 0)
+    end
+  end
+
+  def doc(project, text_or_path) do
+    project |> project() |> doc(text_or_path)
   end
 
   def search_store(project) do
