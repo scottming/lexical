@@ -256,7 +256,12 @@ defmodule Lexical.RemoteControl.CodeMod.Format do
 
       {:ok, formatter_and_opts}
     rescue
-      _ ->
+      error ->
+        Logger.warning("Failed to get formatter from Mix task: #{inspect(error)}")
+        :error
+    catch
+      :exit, reason ->
+        Logger.warning("Mix process exited during formatting: #{inspect(reason)}")
         :error
     end
   end

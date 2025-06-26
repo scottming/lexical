@@ -80,6 +80,32 @@ defmodule Lexical.RemoteControl.CodeMod.FormatTest do
       assert result == formatted()
     end
 
+    test "it handles Mix.ProjectStack GenServer failures gracefully", %{project: project} do
+      # Patch Mix.Tasks.Future.Format.formatter_for_file to simulate Mix.ProjectStack crash
+      patch(Mix.Tasks.Future.Format, :formatter_for_file, fn _, _ ->
+        raise %FunctionClauseError{
+          module: Mix.ProjectStack,
+          function: :config_mtime,
+          arity: 0
+        }
+      end)
+
+      # Should still be able to format using fallback mechanism
+      {:ok, result} = modify(unformatted(), project: project)
+      assert result == formatted()
+    end
+
+    test "it handles Mix process exit gracefully", %{project: project} do
+      # Patch to simulate process exit (like when Mix.ProjectStack GenServer crashes)
+      patch(Mix.Tasks.Future.Format, :formatter_for_file, fn _, _ ->
+        exit(:no_process)
+      end)
+
+      # Should still be able to format using fallback mechanism
+      {:ok, result} = modify(unformatted(), project: project)
+      assert result == formatted()
+    end
+
     test "it will fail to format a file not in the project", %{project: project} do
       assert {:error, reason} = modify(unformatted(), file_path: "/tmp/foo.ex", project: project)
       assert reason =~ "Cannot format file /tmp/foo.ex"
