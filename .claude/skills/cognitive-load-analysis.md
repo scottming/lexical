@@ -323,3 +323,209 @@ But note: Lexical **encapsulates it behind `path_at/2`**, so callers never touch
 ### The one-sentence takeaway on recursion
 
 **Good recursion is not cleverer recursion — it's recursion that the reader doesn't need to think about recursively.** The best recursive code is code where the reader doesn't even know it's recursing.
+
+---
+
+## Deep Dive: Composition and Cognitive Load
+
+Composition is a second-order cognitive operation. Its cost comes from three steps:
+1. **Understand each part** (simulate each part)
+2. **Understand the connections** (compare interfaces)
+3. **Understand the emergent whole** (simulate the combined behavior)
+
+Step 3 is the killer. If you must **understand all parts simultaneously** to understand the whole, cognitive cost is multiplicative. Lexical's strategy: **let readers understand each part independently, then understand the whole through cheap operations** (enumerate, compare, linear simulate).
+
+### Technique 1: Flat composition (Compose → Enumerate)
+
+The simplest composition: lay parts in a flat list, merge results with `flat_map`. Parts have zero coupling.
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/code_action.ex
+@handlers [
+  Handlers.ReplaceRemoteFunction,
+  Handlers.ReplaceWithUnderscore,
+  Handlers.OrganizeAliases,
+  Handlers.AddAlias,
+  Handlers.RemoveUnusedAlias
+]
+
+def for_range(doc, range, diagnostics, kinds) do
+  Enum.flat_map(@handlers, fn handler ->
+    if applies?(kinds, handler), do: handler.actions(doc, range, diagnostics), else: []
+  end)
+end
+```
+
+To understand the whole: **enumerate the 5 modules in the list**. Each works independently, results are simply merged. You don't need to understand handler A to understand handler B.
+
+The same pattern appears in compiler selection:
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/build/document.ex
+@compilers [Compilers.Config, Compilers.Elixir, Compilers.EEx, Compilers.HEEx, Compilers.NoOp]
+
+def compile(document) do
+  compiler = Enum.find(@compilers, & &1.recognizes?(document))
+  compiler.compile(document)
+end
+```
+
+**Cognitive formula**: cost of understanding the whole = Σ(cost of each part) + enumeration cost, NOT Π(cost of each part).
+
+### Technique 2: Pipeline composition (Compose → Linear simulate)
+
+Parts are sequenced. Each step's output feeds the next step's input. The reader traces a linear data flow.
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api/proxy/buffering_state.ex
+def flush(%__MODULE__{} = state) do
+  {messages, commands} =
+    state.buffer
+    |> Enum.reverse()                          # Step 1: reverse
+    |> Enum.split_with(fn value ->             # Step 2: partition
+      match?(mfa(module: Dispatch, function: :broadcast), value)
+    end)
+
+  {project_compile, document_compiles, reindex} = collapse_commands(commands)
+
+  all_commands
+  |> Enum.concat(collapse_messages(...))       # Step 3: merge
+  |> Enum.filter(&match?(mfa(), &1))           # Step 4: filter
+  |> Enum.sort_by(fn mfa(seq: seq) -> seq end) # Step 5: sort
+end
+```
+
+The reader's mental model is a **straight line**: data in → transform1 → transform2 → ... → data out. No branching to maintain in working memory.
+
+**Flat vs Pipeline**: flat parts work **in parallel** (independent, merged) → enumerate. Pipeline parts work **in series** (sequential, chained) → linear simulate. Both avoid "understand all parts simultaneously."
+
+### Technique 3: Layered composition (Compose → Layer-by-layer simulate)
+
+The most sophisticated composition technique in Lexical, concentrated in the Proto DSL.
+
+```
+What the user sees:
+  deftype [name: string(), range: optional(range_type())]
+
+What actually expands:
+  Layer 0: deftype                      ← user writes this
+  Layer 1: Json + Inspect + Access + Struct + Parse + Meta  ← deftype composes these
+  Layer 2: each sub-macro's internals   ← sub-macros work independently
+```
+
+```elixir
+# apps/proto/lib/lexical/proto/type.ex
+defmacro deftype(types) do
+  quote location: :keep do
+    unquote(Json.build(caller_module))       # concern 1
+    unquote(Inspect.build(caller_module))    # concern 2
+    unquote(Access.build())                  # concern 3
+    unquote(Struct.build(types, __CALLER__)) # concern 4
+    unquote(Parse.build(types))              # concern 5
+    unquote(Meta.build(types))               # concern 6
+  end
+end
+```
+
+One layer up, `defrequest` composes `Message.build` (which reuses deftype's sub-macros):
+
+```elixir
+# apps/proto/lib/lexical/proto/request.ex
+defp do_defrequest(method, types, caller) do
+  quote location: :keep do
+    defmodule LSP do
+      unquote(Message.build({:request, :lsp}, method, lsp_types, ...))
+    end
+    unquote(Message.build({:request, :elixir}, method, elixir_types, ...))
+  end
+end
+```
+
+**Cognitive effect**: the reader at **any layer** doesn't need to understand other layers.
+- User writing `deftype`: only needs "declare fields and types"
+- Maintainer reading `deftype` macro: only needs "8 sub-macros, each does what" (enumerate)
+- Maintainer reading `Json.build`: only needs "generate Jason.Encoder implementation"
+
+Each layer is an **abstraction barrier** that prevents cognitive load from leaking upward. This is the core value of composition in functional programming.
+
+**Contrast with the anti-pattern**: if `deftype` inlined all generation logic in one macro, the reader would need to simultaneously understand JSON encoding, Inspect implementation, Access protocol, struct definition, parsing logic, and metadata — 6 concerns interleaved.
+
+### Technique 4: Transparent composition (Compose → Invisible)
+
+The composition exists, but the caller doesn't know about it.
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api/proxy/draining_state.ex
+defstruct [:proxying_state, :buffering_state]
+
+def new(%BufferingState{} = bs, %ProxyingState{} = ps) do
+  %__MODULE__{buffering_state: bs, proxying_state: ps}
+end
+
+# Delegates to internal components — caller doesn't need to know
+def drained?(%__MODULE__{} = state) do
+  ProxyingState.empty?(state.proxying_state)
+end
+
+def add_mfa(%__MODULE__{} = state, mfa) do
+  %__MODULE__{state | buffering_state: BufferingState.add_mfa(state.buffering_state, mfa)}
+end
+```
+
+When Proxy's `gen_statem` calls `DrainingState.add_mfa(state, mfa)`, it **doesn't know** BufferingState is doing the work underneath. The composition is encapsulated behind DrainingState's interface.
+
+The same pattern appears in Analysis (composing AST + Document + Scopes + Comments into one struct).
+
+**Cognitive principle**: same as "protocol dispatch hides recursion" — **if composition is invisible to the caller, its cognitive cost is zero**.
+
+### Technique 5: Closure composition (Compose → Single concept)
+
+Pack a multi-step operation into a closure and hand it to the caller as a single "capability."
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/progress.ex
+def with_percent_progress(label, max, func) when is_function(func, 1) do
+  {report_progress, on_complete} = begin_percent(label, max)
+
+  try do
+    func.(report_progress)  # passes "report progress" capability as argument
+  after
+    on_complete.()           # cleanup encapsulated in closure
+  end
+end
+
+defp begin_percent(label, max) do
+  report = fn delta -> broadcast(percent_progress(label: label, ...)) end
+  complete = fn -> broadcast(project_progress(label: label, stage: :complete)) end
+  {report, complete}
+end
+```
+
+The caller's view:
+
+```elixir
+with_percent_progress("Indexing", file_count, fn report ->
+  Enum.each(files, fn file ->
+    index(file)
+    report.(1)  # just call a function
+  end)
+end)
+```
+
+The caller doesn't need to understand the progress system's internals (broadcasting, events, label capture). They receive a **single concept**: "calling `report.(1)` reports progress."
+
+**Cognitive principle**: the closure packages "combined behavior" into a callable object. No enumeration of parts, no comparison of interfaces — just "what does calling this function do?"
+
+### Composition reduction summary
+
+| Strategy | Composition downgraded to | Reader's mental model | Use case |
+|----------|--------------------------|----------------------|----------|
+| Flat composition | Enumerate | "N independent parts, merged results" | @handlers, @compilers |
+| Pipeline composition | Linear simulate | "Data flows through a series of transforms" | `with` chains, `\|>` pipes, Enum chains |
+| Layered composition | Layer-by-layer simulate | "This layer does X, don't care how layers below work" | Proto DSL, macro systems |
+| Transparent composition | Invisible | "Call this module" (unaware of internal composition) | DrainingState, Analysis |
+| Closure composition | Single concept | "Call this function" | Progress, resource management |
+
+### The one-sentence takeaway on composition
+
+**Good composition lets you understand the whole without understanding all parts simultaneously.** The best composed code is code where the reader doesn't even know there are multiple parts.

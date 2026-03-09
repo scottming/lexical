@@ -323,3 +323,214 @@ end
 ### 递归的一句话总结
 
 **好的递归不是写得更聪明的递归，而是让读者不需要递归思考的递归。** 最好的递归代码，读者甚至不知道它在递归。
+
+---
+
+## 深入分析：组合与认知负荷
+
+组合是一个二阶认知操作。它的代价来自三步：
+1. **理解各部件**（对每个部件做模拟）
+2. **理解连接方式**（对接口做对比）
+3. **理解涌现的整体**（对组合后的行为做模拟）
+
+第 3 步是杀手。如果你必须**同时理解所有部件才能理解整体**，认知成本是乘法级的。Lexical 的策略是：**让读者能独立理解每个部件，然后通过廉价操作（枚举、对比、线性模拟）理解整体**。
+
+### 技巧一：扁平组合（组合 → 枚举）
+
+最简单的组合：把部件平铺在一个列表里，用 `flat_map` 合并结果。部件之间零耦合。
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/code_action.ex
+@handlers [
+  Handlers.ReplaceRemoteFunction,
+  Handlers.ReplaceWithUnderscore,
+  Handlers.OrganizeAliases,
+  Handlers.AddAlias,
+  Handlers.RemoveUnusedAlias
+]
+
+def for_range(doc, range, diagnostics, kinds) do
+  Enum.flat_map(@handlers, fn handler ->
+    if applies?(kinds, handler), do: handler.actions(doc, range, diagnostics), else: []
+  end)
+end
+```
+
+读者理解整体的方式：**枚举列表里的 5 个模块**。每个模块独立工作，互不影响，结果只是简单合并。不需要理解 handler A 才能理解 handler B。
+
+同样的模式出现在编译器选择中：
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/build/document.ex
+@compilers [Compilers.Config, Compilers.Elixir, Compilers.EEx, Compilers.HEEx, Compilers.NoOp]
+
+def compile(document) do
+  compiler = Enum.find(@compilers, & &1.recognizes?(document))
+  compiler.compile(document)
+end
+```
+
+**认知公式**：理解整体的成本 = Σ(理解每个部件) + 枚举成本，而不是 Π(理解每个部件)。
+
+### 技巧二：管道组合（组合 → 线性模拟）
+
+部件按顺序排列，每步的输出是下步的输入。读者只需线性追踪数据流。
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api/proxy/buffering_state.ex
+def flush(%__MODULE__{} = state) do
+  {messages, commands} =
+    state.buffer
+    |> Enum.reverse()                          # Step 1: 反转
+    |> Enum.split_with(fn value ->             # Step 2: 分组
+      match?(mfa(module: Dispatch, function: :broadcast), value)
+    end)
+
+  {project_compile, document_compiles, reindex} = collapse_commands(commands)
+
+  all_commands
+  |> Enum.concat(collapse_messages(...))       # Step 3: 合并
+  |> Enum.filter(&match?(mfa(), &1))           # Step 4: 过滤
+  |> Enum.sort_by(fn mfa(seq: seq) -> seq end) # Step 5: 排序
+end
+```
+
+读者的心理模型是**一条直线**：数据进来 → 变换1 → 变换2 → ... → 数据出去。不需要在工作记忆中维护分支。
+
+**扁平组合 vs 管道组合**的区别：
+- 扁平：部件**并行**，互不依赖，结果合并 → 枚举
+- 管道：部件**串行**，前一步的输出是后一步的输入 → 线性模拟
+
+两者都避免了"同时理解所有部件"。
+
+### 技巧三：分层组合（组合 → 逐层模拟）
+
+Lexical 中最精妙的组合技巧，集中体现在 Proto DSL 中。
+
+```
+用户看到的：
+  deftype [name: string(), range: optional(range_type())]
+
+实际展开的层次：
+  Layer 0: deftype                      ← 用户写这个
+  Layer 1: Json + Inspect + Access + Struct + Parse + Meta  ← deftype 组合这些
+  Layer 2: 每个子宏内部的实现          ← 子宏独立工作
+```
+
+```elixir
+# apps/proto/lib/lexical/proto/type.ex
+defmacro deftype(types) do
+  quote location: :keep do
+    unquote(Json.build(caller_module))       # 关注点 1
+    unquote(Inspect.build(caller_module))    # 关注点 2
+    unquote(Access.build())                  # 关注点 3
+    unquote(Struct.build(types, __CALLER__)) # 关注点 4
+    unquote(Parse.build(types))              # 关注点 5
+    unquote(Meta.build(types))               # 关注点 6
+  end
+end
+```
+
+再上一层，`defrequest` 组合了 `Message.build`（它复用了 deftype 的子宏）：
+
+```elixir
+# apps/proto/lib/lexical/proto/request.ex
+defp do_defrequest(method, types, caller) do
+  quote location: :keep do
+    defmodule LSP do
+      unquote(Message.build({:request, :lsp}, method, lsp_types, ...))
+    end
+    unquote(Message.build({:request, :elixir}, method, elixir_types, ...))
+  end
+end
+```
+
+**认知效果**：读者在**任何一层**都不需要理解其他层。
+- 用户写 `deftype`：只需知道"声明字段和类型"
+- 维护者读 `deftype` 宏：只需知道"8 个子宏各做什么"（枚举）
+- 维护者读 `Json.build`：只需知道"生成 Jason.Encoder 实现"
+
+每一层是一个**抽象屏障**（abstraction barrier），阻止认知负荷向上泄漏。这正是函数式编程中组合的核心价值。
+
+**对比反面模式**：如果 `deftype` 不分层，把所有生成逻辑写在一个宏里，读者就必须同时理解 JSON 编码、Inspect 实现、Access 协议、struct 定义、解析逻辑、元数据——6 个关注点交织在一起。
+
+### 技巧四：透明组合（组合 → 不可见）
+
+组合存在，但调用者不知道。
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api/proxy/draining_state.ex
+defstruct [:proxying_state, :buffering_state]
+
+def new(%BufferingState{} = bs, %ProxyingState{} = ps) do
+  %__MODULE__{buffering_state: bs, proxying_state: ps}
+end
+
+# 委托给内部组件——调用者不需要知道 DrainingState 由两部分组成
+def drained?(%__MODULE__{} = state) do
+  ProxyingState.empty?(state.proxying_state)
+end
+
+def add_mfa(%__MODULE__{} = state, mfa) do
+  %__MODULE__{state | buffering_state: BufferingState.add_mfa(state.buffering_state, mfa)}
+end
+```
+
+Proxy 的 `gen_statem` 调用 `DrainingState.add_mfa(state, mfa)` 时，它**不知道**这背后是 BufferingState 在工作。组合被 DrainingState 的接口封装了。
+
+同样的模式出现在 Analysis 中（组合了 AST + Document + Scopes + Comments 为一个 struct）。
+
+**认知原理**：和递归中"协议分发隐藏递归"是同一个思想——**如果组合对调用者不可见，它的认知成本就是零**。
+
+### 技巧五：闭包组合（组合 → 单一概念）
+
+用闭包把多步操作打包成一个"能力"，传给调用者。
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/progress.ex
+def with_percent_progress(label, max, func) when is_function(func, 1) do
+  {report_progress, on_complete} = begin_percent(label, max)
+
+  try do
+    func.(report_progress)  # 把"汇报进度"这个能力作为参数传入
+  after
+    on_complete.()           # 把"完成清理"封装在闭包里
+  end
+end
+
+defp begin_percent(label, max) do
+  # 返回两个闭包，各自捕获了 label 和 max
+  report = fn delta -> broadcast(percent_progress(label: label, ...)) end
+  complete = fn -> broadcast(project_progress(label: label, stage: :complete)) end
+  {report, complete}
+end
+```
+
+调用者的视角：
+
+```elixir
+with_percent_progress("Indexing", file_count, fn report ->
+  Enum.each(files, fn file ->
+    index(file)
+    report.(1)  # 就像调用一个普通函数
+  end)
+end)
+```
+
+调用者不需要理解进度系统的内部结构（广播、事件、label 捕获）。他拿到的是一个**单一概念**："调用 `report.(1)` 就是汇报进度"。
+
+**认知原理**：闭包把"组合后的行为"封装成一个可调用对象。读者不需要枚举部件、不需要对比接口——他只需要知道"调用这个函数做什么"。
+
+### 组合降级策略总结
+
+| 策略 | 组合被降级为 | 读者的心理模型 | 适用场景 |
+|------|------------|--------------|---------|
+| 扁平组合 | 枚举 | "N 个独立部件，合并结果" | @handlers、@compilers |
+| 管道组合 | 线性模拟 | "数据经过一系列变换" | `with` 链、`\|>` 管道、Enum 链 |
+| 分层组合 | 逐层模拟 | "这层做什么，不管下层怎么做" | Proto DSL、宏系统 |
+| 透明组合 | 不可见 | "调用这个模块"（不知道内部有组合） | DrainingState、Analysis |
+| 闭包组合 | 单一概念 | "调用这个函数" | Progress、资源管理 |
+
+### 组合的一句话总结
+
+**好的组合让你不需要同时理解所有部件就能理解整体。** 最好的组合代码，读者甚至不知道这里有多个部件。
