@@ -178,3 +178,148 @@ The reader doesn't need to think recursively — the protocol framework recurses
 ### The one-sentence takeaway
 
 **Split things that would need to be simulated together, so the reader only tracks one causal chain at a time.** Nested State Module, Detection behaviour, and `with` pipelines are all doing the same thing.
+
+---
+
+## Deep Dive: Recursion and Cognitive Load
+
+Recursion is the most expensive cognitive operation because readers must **hold multiple stack frames in working memory simultaneously** — simulating "a simulation," a second-order operation. Lexical's strategy: **downgrade recursion to a cheaper cognitive operation** so the reader never thinks recursively.
+
+### Technique 1: Framework absorbs traversal (Recurse → Single-step simulate)
+
+The most frequently used recursion pattern in Lexical. The reader's mental model is "do X for each node," not "recursively traverse a tree."
+
+```elixir
+# apps/common/lib/lexical/ast/detection/string.ex
+defp detect_string(paths, %Position{} = position) do
+  {_, detected?} =
+    Macro.postwalk(paths, false, fn
+      ast, true  -> {ast, true}                     # already found, short-circuit
+      ast, false -> {ast, do_detect(ast, position)}  # check current node
+    end)
+  detected?
+end
+```
+
+The callback processes **one node**. `Macro.postwalk` handles all traversal logic. This is the same principle as Nested State Module — **sever the simulation chain** by splitting "how to traverse" from "what to do at each step."
+
+| Framework | Reader's mental model | Usage |
+|-----------|----------------------|-------|
+| `Macro.prewalk` | "Do X for each node top-down" | analysis.ex, variable.ex, quoted.ex |
+| `Macro.postwalk` | "Do X for each node bottom-up" | string.ex |
+| `Macro.traverse` | "Do X on enter, Y on leave" | analysis.ex, error.ex |
+| `Zipper.traverse` | "Do X for each node in range" | ast.ex `traverse_in/4` |
+| `Zipper.find` | "Find first node matching P" | remove_unused_alias.ex |
+| Protocol dispatch | "Convert this thing" | convertible.ex |
+
+### Technique 2: Multi-clause mirrors data shape (Recurse → Enumerate)
+
+```elixir
+# apps/common/lib/future/code/typespec.ex
+defp collect_vars({:type, _anno, _kind, args}) when is_list(args) do
+  Enum.flat_map(args, &collect_vars/1)        # type with children → expand
+end
+
+defp collect_vars({:paren_type, _anno, [type]}) do
+  collect_vars(type)                           # parentheses → unwrap
+end
+
+defp collect_vars({:var, _anno, var}) do
+  [erl_to_ex_var(var)]                         # variable → collect (base case)
+end
+
+defp collect_vars(_) do
+  []                                           # anything else → ignore (base case)
+end
+```
+
+The reader's mental model is not "recursively walk a type tree" but **"enumerate four cases"**:
+1. Type with children → expand
+2. Parentheses → unwrap
+3. Variable → collect
+4. Other → ignore
+
+Each clause is independently readable. This is **structural recursion** — the function's clause structure mirrors the data structure, one-to-one. The `Enum.flat_map(args, &collect_vars/1)` expression is especially important: it presents "recurse on each element" as "flat_map over a list" — the reader sees **iteration**, not recursion.
+
+### Technique 3: Tail recursion disguised as loop (Recurse → Loop simulate)
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/search/indexer/source/reducer.ex
+defp maybe_pop_block(%__MODULE__{} = reducer) do
+  if block_ended?(reducer) do
+    reducer
+    |> pop_block()
+    |> maybe_pop_block()   # tail recursion
+  else
+    reducer
+  end
+end
+```
+
+The reader's mental model is a **while loop**: "keep popping blocks until no more blocks have ended." No need to hold multiple stack frames — there's only one `reducer` evolving over time.
+
+Key detail: **condition, transformation, and recursion** are split into three independent concerns:
+- `block_ended?` — pure predicate, no state change
+- `pop_block` — pure transformation, no branching or recursion
+- `maybe_pop_block` — skeleton: check → transform → recurse
+
+### Technique 4: Protocol dispatch hides recursion (Recurse → Invisible)
+
+```elixir
+# What the caller writes:
+Convertible.to_native(some_nested_struct, doc)
+
+# What actually happens:
+# 1. Any impl: Map.from_struct → call to_native on each field
+# 2. List impl: call to_native on each element
+# 3. Map impl: call to_native on each value
+# 4. Specific impl: do type-specific conversion
+```
+
+The caller **doesn't know recursion exists**. They see one function call returning one result. The recursion is fully absorbed by protocol polymorphic dispatch. This is the ultimate form of cognitive cost reduction: **eliminate the reader's awareness that recursion is happening**.
+
+### Technique 5: `update_in` with dynamic path (Recurse → Declarative)
+
+```elixir
+# reducer.ex
+hierarchy =
+  update_in(reducer.block_hierarchy, id_path, fn current ->
+    Map.put(current, block.id, %{})
+  end)
+```
+
+Updating a nested map is inherently recursive (descend layer by layer along the path), but `update_in` makes it declarative: "at this path, do this operation." The reader doesn't need to think "open layer 1, open layer 2, modify, close layer 2, close layer 1."
+
+### Anti-pattern: When recursion stays recursive
+
+For contrast, one of Lexical's few places requiring genuine recursive thinking:
+
+```elixir
+# apps/common/lib/lexical/ast.ex  innermost_path/3
+defp innermost_path({form, _, args}, acc, fun) when is_atom(form) and is_list(args) do
+  case fun.({form, _, args}) do
+    true -> {:ok, [{form, _, args} | acc]}
+    false ->
+      innermost_path_args(args, [{form, _, args} | acc], fun) ||
+        innermost_path_list(args, [{form, _, args} | acc], fun)
+  end
+end
+```
+
+This requires tracking: accumulator mutation, two recursive branches (args and list), `||` short-circuit semantics, and how the path builds inside-out. It's the highest cognitive cost recursion in Lexical.
+
+But note: Lexical **encapsulates it behind `path_at/2`**, so callers never touch this recursion directly.
+
+### Recursion reduction summary
+
+| Strategy | Recursion downgraded to | Reader's mental model | Frequency |
+|----------|------------------------|----------------------|-----------|
+| Framework absorbs traversal | Single-step simulate | "Do X for each node" | **Highest** |
+| Multi-clause mirrors data | Enumerate | "These N cases do what" | High |
+| Tail recursion | Loop simulate | "Keep doing until done" | Medium |
+| Protocol dispatch | Invisible | "Convert this thing" | Medium |
+| `update_in` / path-based | Declarative | "At this path, do this" | Low |
+
+### The one-sentence takeaway on recursion
+
+**Good recursion is not cleverer recursion — it's recursion that the reader doesn't need to think about recursively.** The best recursive code is code where the reader doesn't even know it's recursing.
