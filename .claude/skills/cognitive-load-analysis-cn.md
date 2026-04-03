@@ -1,20 +1,36 @@
 # Lexical 模式的认知负荷分析
 
-从五种基础认知操作的角度（基于 Barsalou 知觉符号系统理论），分析 Lexical 代码库如何降低认知负荷。
+从五种基础认知操作和四种桥接机制的角度（基于 Barsalou 知觉符号系统理论），分析 Lexical 代码库如何降低认知负荷。
 
 ## 五种认知操作
 
-按认知代价从低到高排列：
+人类阅读代码时动用三种**元素操作**（大脑对每个代码单元做什么）和两种**结构维度**（复杂度沿哪个轴增长）：
 
-| 层级 | 操作 | 读者做什么 |
-|------|------|-----------|
-| 一阶 | **枚举** | 扫描、列举可见元素 |
-| 一阶 | **对比** | 比较两个事物的异同 |
-| 一阶 | **模拟** | 在脑中执行代码、追踪状态变化、预测结果 |
-| 二阶 | **组合** | 将部件组装成整体 |
-| 二阶 | **递归** | 在不同抽象层级重复应用模式 |
+```
+元素操作（每个单元的认知成本）：
+  枚举 ─── 激活概念："这是什么？"
+  对比 ─── 绑定类型："A 还是 B？"
+  模拟 ─── 运行因果链："如果 X，那会怎样？"
 
-一阶操作代价低，二阶操作代价高。**模拟**是一阶操作中最昂贵的——需要同时维持心理状态、追踪控制流、预测副作用。
+结构维度（复杂度沿哪个轴增长）：
+  组合 ─── 同层级单元变多（水平）
+  嵌套 ─── 抽象层级变深（垂直）
+```
+
+元素操作有内在的成本梯度：**枚举几乎免费，对比在近距离时低成本，模拟成本高**（受工作记忆 ~4 项限制，Cowan 2001）。结构维度**没有固有成本**——它们的成本完全取决于内部需要什么元素操作：
+
+- 好的组合 → 读者只需**枚举**部件 → 低成本
+- 好的嵌套 → 读者只需**对比**各层接口 → 低成本
+- 差的组合 → 读者必须同时**模拟**所有部件 → 高成本
+- 差的嵌套 → 读者必须**模拟**多个栈帧 → 高成本
+
+**成本 = 元素操作成本 × 结构复杂度**，而非结构复杂度本身。这就是为什么结构良好的多层代码可以比强迫模拟的"扁平"代码更便宜。
+
+四种**桥接机制**连接这些操作：
+- **固化**（entrenchment）：重复经验将模拟 → 枚举（第 N 次见到一个模式，你识别它而非追踪它）
+- **模式补全**（pattern completion）：好的组合触发对未见部分的自动预测（Barsalou 2009）
+- **同构**（isomorphism）：当嵌套层级遵循相同结构模式时，理解一层即可预测其余——模式补全从水平维度延伸到垂直维度（Bastos et al. 2012, Martins et al. 2015）
+- **生产力**（productivity）：组合 × 嵌套共同从有限模块产生无限表达力（Barsalou 1999）
 
 ---
 
@@ -67,15 +83,16 @@ end
 ### 3. `with` 线性管道 → 消除分支模拟
 
 ```elixir
-def snipe(%Setup{} = setup) do
-  with {:ok, prepared} <- Transaction.prepare(setup),
-       {:ok, result}   <- Submission.execute(prepared, setup) do
-    {:ok, result}
+# apps/server/lib/lexical/server.ex
+def handle_message(%_{} = request, %State{} = state) do
+  with {:ok, handler} <- fetch_handler(request),
+       {:ok, req} <- Convert.to_native(request) do
+    TaskQueue.add(request.id, {handler, :handle, [req, state.configuration]})
   end
 end
 ```
 
-读者的模拟路径是**线性**的：step1 → step2 → 完成。不需要在工作记忆中维护分支树。每一步的名字（`Transaction.prepare`、`Submission.execute`）告诉你**做什么**，不需要展开函数体去模拟**怎么做**。
+读者的模拟路径是**线性**的：step1 → step2 → 完成。不需要在工作记忆中维护分支树。每一步的名字（`fetch_handler`、`Convert.to_native`）告诉你**做什么**，不需要展开函数体去模拟**怎么做**。
 
 ---
 
@@ -132,16 +149,17 @@ end
 ### `%Struct{} = param` → 类型对比在签名处完成
 
 ```elixir
-def prepare(%Setup{} = setup) do ...
+# apps/remote_control/lib/lexical/remote_control/code_intelligence/entity.ex
+def resolve(%Analysis{} = analysis, %Position{} = position) do ...
 ```
 
-读者不需要进入函数体、模拟数据流来确认输入类型。在签名处一眼对比：期望 Setup，传入的是 Setup 吗？完成。一次**对比**，零次**模拟**。
+读者不需要进入函数体、模拟数据流来确认输入类型。在签名处一眼对比：期望 Analysis 和 Position，传入的类型对吗？完成。一次**对比**，零次**模拟**。
 
 ---
 
-## 二阶操作：组合与递归
+## 结构维度：组合与嵌套
 
-Lexical 在二阶操作上的处理更精妙，但使用频率较低：
+Lexical 在结构维度上的处理更精妙。概览两个典型例子（详见后面的深入分析）：
 
 ### 组合 → Proto DSL 的分层宏设计
 
@@ -152,7 +170,7 @@ defrequest = deftype + Message.build + Jason.Encoder
 
 每一层只需理解自己的输入输出，不需要理解其他层的实现。组合的认知成本被**封装**在宏里，使用者看到的是一个 `deftype [name: string(), ...]`。
 
-### 递归 → Convertible 协议的自动递归
+### 嵌套 → Convertible 协议的自动嵌套遍历
 
 ```elixir
 # Any fallback 自动递归转换 struct 字段
@@ -161,19 +179,22 @@ def to_native(%_struct{} = struct, context_document) do
 end
 ```
 
-读者不需要自己做递归思考——协议框架替你递归了。递归的认知负荷被框架吸收，读者只需维持扁平的心理模型。
+读者不需要思考嵌套深度——协议框架替你遍历了。嵌套的认知负荷被框架吸收，读者只需维持扁平的心理模型。
 
 ---
 
 ## 总结
 
-| 认知操作 | Lexical 的降低策略 | 使用频率 |
+| 元素操作 | Lexical 的降低策略 | 使用频率 |
 |---------|-------------------|---------|
 | **模拟** | 纯函数与副作用分离（State Module、Detection、`with` 管道） | **最高** |
 | **枚举** | 聚集到单一位置（@handlers、@enforce_keys、@impl） | 高 |
 | **对比** | 统一接口（Protocol、Behaviour、签名类型标注） | 中 |
-| **组合** | 封装在宏里，使用者只见声明式 API（Proto DSL） | 低 |
-| **递归** | 框架自动递归，使用者不需要递归思考（Convertible Any） | 低 |
+
+| 结构维度 | Lexical 的降低策略 | 使用频率 |
+|---------|-------------------|---------|
+| **组合** | 扁平列表、管道、分层宏、透明封装、闭包（详见深入分析） | 高 |
+| **嵌套** | 门面、清晰边界、薄编排层、封装、同构、框架吸收遍历（详见深入分析） | 高 |
 
 ### 一句话总结
 
@@ -181,11 +202,129 @@ end
 
 ---
 
-## 深入分析：递归与认知负荷
+## 深入分析：嵌套与认知负荷
 
-递归是认知代价最高的操作，因为读者必须**同时在工作记忆中维持多个栈帧**——模拟"模拟"，一个二阶操作。Lexical 的策略是：**把递归降级为更廉价的认知操作**，让读者根本不需要递归思考。
+嵌套是代价最高的结构维度，因为读者必须**同时在工作记忆中维持多个抽象层级**——受限于约 4 个层级（Cowan 2001）。
 
-### 技巧一：框架吸收遍历（递归 → 单步模拟）
+在代码中，嵌套有两种主要形态：
+
+- **抽象层级嵌套**：模块 A 调用模块 B 调用模块 C……读者需要跳转多个文件才能理解一个业务操作。这是日常开发中最常见的嵌套形态。
+- **代码递归**：函数调用自身，读者需要在脑中维持多个栈帧。出现频率较低但认知成本极高。
+
+Lexical 的策略：**把嵌套降级为更廉价的认知操作**，让读者停留在当前层级，通过命名、边界或同构预测其余层级。
+
+---
+
+### 一、抽象层级嵌套
+
+Lexical 的 LSP 补全请求从 stdin 到返回结果，途经约 15 个模块（StdIO → Server → JsonRpc → Convert → TaskQueue → Handler → CodeIntelligence → Env → Api → erpc → RemoteControl → Completion → …返回… → Translatable → Convert → Transport）。如果读者需要同时理解所有层级，认知成本将难以承受。
+
+Lexical 通过以下技巧将这种深度控制在读者可管理的范围内。
+
+#### 门面模式收敛入口（嵌套 → 枚举）
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control.ex — 22 个 defdelegate
+defdelegate compile_document(project, document), to: Api.Proxy
+defdelegate complete(env), to: RemoteControl.Completion
+defdelegate resolve_entity(analysis, position), to: CodeIntelligence.Entity
+defdelegate broadcast(message), to: Dispatch
+# ... 共 22 个
+```
+
+`RemoteControl` 是远程应用的门面——调用者只需知道一个模块，不需要知道背后有 Proxy、Dispatch、Completion、CodeIntelligence 等十几个内部模块。嵌套深度从"在 N 个模块中搜索目标函数"收敛为"在一个模块中枚举"。
+
+同样的模式：`Transport` 用 `defdelegate write(message), to: @implementation` 把传输实现（StdIO vs NoOp）隐藏在编译期配置后面。
+
+#### 清晰边界阻止下探（嵌套 → 命名预测）
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api.ex
+def complete(%Project{} = project, %Env{} = env) do
+  RemoteControl.call(project, RemoteControl, :complete, [env])
+end
+
+def resolve_entity(%Project{} = project, %Analysis{} = analysis, %Position{} = position) do
+  RemoteControl.call(project, RemoteControl, :resolve_entity, [analysis, position])
+end
+```
+
+`RemoteControl.Api` 是管理节点与项目节点之间的 RPC 边界。每个函数都是一行 `RemoteControl.call`。读者看到 `Api.complete(project, env)` 时，函数签名 `(%Project{}, %Env{})` 已经是完备的理解——"带着这个项目和这个环境，在远端执行补全"，**不需要下探**。
+
+这个边界的价值不仅是封装，更是**阻止认知泄漏**：服务器端代码永远不需要理解远程节点的内部结构。
+
+#### 薄编排层只做调度（嵌套 → 线性模拟）
+
+```elixir
+# apps/server/lib/lexical/server/provider/handlers/completion.ex
+def handle(%Requests.Completion{} = request, %Configuration{} = config) do
+  completions =
+    CodeIntelligence.Completion.complete(
+      config.project,
+      document_analysis(request.document, request.position),
+      request.position,
+      request.context || Completion.Context.new(trigger_kind: :invoked)
+    )
+
+  response = Responses.Completion.new(request.id, completions)
+  {:reply, response}
+end
+```
+
+Handler 是三步线性管道：获取分析 → 调用智能 → 包装响应。读者不需要下探 `CodeIntelligence.Completion` 就能理解这一层在做什么。每步的名字（`document_analysis`、`Completion.complete`、`Responses.Completion.new`）创建了足够精确的预测。
+
+#### 封装复杂内部于简洁 API（嵌套 → 不可见）
+
+```elixir
+# apps/common/lib/lexical/ast.ex
+# 公共 API：简洁的 {:ok, path} | {:error, _}
+def path_at(%Analysis{} = analysis, %Position{} = position) do
+  with {:ok, ast, _} <- from(analysis) do
+    path_at(ast, position)
+  end
+end
+
+# 内部实现：Lexical 中认知成本最高的递归之一（双分支 + accumulator + || 短路）
+defp innermost_path({form, _, args}, acc, fun) when is_atom(form) and is_list(args) do
+  case fun.({form, _, args}) do
+    true -> {:ok, [{form, _, args} | acc]}
+    false ->
+      innermost_path_args(args, [{form, _, args} | acc], fun) ||
+        innermost_path_list(args, [{form, _, args} | acc], fun)
+  end
+end
+```
+
+调用者永远不接触 `innermost_path/3`。同样的模式：`Env.new/3` 隐藏了 13+ 个 Detection 模块的组合，`CodeIntelligence.Completion.complete/4` 隐藏了过滤、翻译、构建的完整管线。
+
+通用原则：**复杂度可以存在，但必须被封装在公共 API 后面，而非泄漏给调用者**。
+
+#### 同构层级（嵌套 → 对比）
+
+当同一层级内的多个模块遵循**相同的结构模式**时，理解一个即可预测其余——把嵌套从模拟降级为对比。Martins et al. (2015) 实验证实，自相似层级结构激活**默认模式网络**（DMN），产生压缩的内部规则表征；非自相似结构激活**额顶控制网络**，需要逐层独立处理。
+
+Lexical 最清晰的同构出现在 **provider handler 层级**：所有 10 个 LSP handler 模块都遵循 `handle/2` → 调用 intelligence → `{:reply, response}`。读完 `Handlers.Completion` 后，读者无需下探即可预测 `Handlers.Hover`、`Handlers.GoToDefinition` 等的形状——心理模型是**在已知模式上做参数替换**，而非重新模拟。
+
+同构延伸到其他层级：code action handler（5 个模块共享 `actions/3` + `kinds/0`）、document compiler（5 个共享 `recognizes?/1` + `compile/1` + `enabled?/0`）、indexer extractor（9 个共享 `extract/2`）。
+
+#### 对比：跨层级的异构嵌套
+
+Lexical 的 LSP 请求管线跨越约 6 个概念层级，每层有**不同**的结构模式：
+
+```
+Transport（字节 I/O）→ Server（OTP 路由）→ Convert（结构映射）→
+TaskQueue（异步调度）→ Handler（领域分发）→ CodeIntelligence（业务逻辑）
+```
+
+读者必须为每层构建独立的心理模型——无法通过同构做跨层预测。这种异构成本是问题本身固有的（传输 ≠ 路由 ≠ 转换 ≠ 调度 ≠ 业务逻辑），但 Lexical 通过**精确命名**缓解：`StdIO`、`Convert.to_native`、`TaskQueue.add`、`handler.handle`——每个名字创建高精度预测，阻止读者下探。
+
+---
+
+### 二、代码递归——嵌套的特殊形态
+
+代码递归是嵌套的一种特殊情况：函数调用自身，读者需要在脑中维持多个栈帧。Lexical 的策略是把递归降级为更廉价的认知操作，让读者**不以递归方式思考递归代码**。
+
+#### 框架吸收遍历（嵌套 → 单步模拟）
 
 Lexical 中**最常用**的递归处理方式。读者的心理模型是"对每个节点做 X"，而不是"递归遍历一棵树"。
 
@@ -201,7 +340,7 @@ defp detect_string(paths, %Position{} = position) do
 end
 ```
 
-回调函数只处理**单个节点**。`Macro.postwalk` 承担了所有遍历逻辑。这和 Nested State Module 是同一个原理——**切断模拟链**，把"如何遍历"和"每步做什么"拆开。
+回调函数只处理**单个节点**。`Macro.postwalk` 承担了所有遍历逻辑——**切断模拟链**，把"如何遍历"和"每步做什么"拆开。
 
 | 框架 | 读者的心理模型 | 使用场景 |
 |------|--------------|---------|
@@ -212,123 +351,89 @@ end
 | `Zipper.find` | "找到第一个满足条件的节点" | remove_unused_alias.ex |
 | Protocol dispatch | "转换这个东西" | convertible.ex |
 
-### 技巧二：多子句模式匹配镜像数据结构（递归 → 枚举）
+#### 多子句镜像数据结构（嵌套 → 枚举）
 
 ```elixir
 # apps/common/lib/future/code/typespec.ex
 defp collect_vars({:type, _anno, _kind, args}) when is_list(args) do
   Enum.flat_map(args, &collect_vars/1)        # 有子类型 → 展开
 end
-
-defp collect_vars({:paren_type, _anno, [type]}) do
-  collect_vars(type)                           # 括号包裹 → 剥掉
-end
-
-defp collect_vars({:var, _anno, var}) do
-  [erl_to_ex_var(var)]                         # 变量 → 收集（基础情况）
-end
-
-defp collect_vars(_) do
-  []                                           # 其他 → 忽略（基础情况）
-end
+defp collect_vars({:paren_type, _anno, [type]}), do: collect_vars(type)  # 括号 → 剥掉
+defp collect_vars({:var, _anno, var}), do: [erl_to_ex_var(var)]          # 变量 → 收集
+defp collect_vars(_), do: []                                             # 其他 → 忽略
 ```
 
-读者的心理模型不是"递归遍历类型树"，而是**枚举四种情况**：
-1. 有子类型的类型 → 展开
-2. 括号 → 剥掉
-3. 变量 → 收集
-4. 其他 → 忽略
+读者的心理模型不是"递归遍历类型树"，而是**枚举四种情况**。函数的 clause 结构镜像了数据的结构（结构递归），`Enum.flat_map` 把"对每个元素递归"表达为**迭代**。
 
-每个子句独立可读。这就是"结构递归"（structural recursion）——函数的 clause 结构镜像了数据的结构，一一对应。`Enum.flat_map(args, &collect_vars/1)` 把"对每个元素递归"表达为"对列表做 flat_map"——读者看到的是**迭代**，不是递归。
-
-### 技巧三：尾递归伪装成循环（递归 → 循环模拟）
+#### 尾递归伪装成循环（嵌套 → 循环模拟）
 
 ```elixir
 # apps/remote_control/lib/lexical/remote_control/search/indexer/source/reducer.ex
 defp maybe_pop_block(%__MODULE__{} = reducer) do
   if block_ended?(reducer) do
-    reducer
-    |> pop_block()
-    |> maybe_pop_block()   # 尾递归
+    reducer |> pop_block() |> maybe_pop_block()
   else
     reducer
   end
 end
 ```
 
-读者的心理模型是一个 **while 循环**："只要 block 结束了，就弹出，直到没有需要弹出的"。不需要维持多个栈帧——只有一个 `reducer` 在不断变化。
+读者的心理模型是 **while 循环**："只要 block 结束了就弹出，直到没有需要弹出的"。不需要维持多个栈帧——只有一个 `reducer` 在不断变化。
 
-关键细节：**条件检测、状态变换、递归**被拆成三个独立关注点：
-- `block_ended?` — 纯判断，不修改状态
-- `pop_block` — 纯变换，不判断也不递归
-- `maybe_pop_block` — 只做"判断 + 调用 + 递归"的骨架
-
-### 技巧四：协议分发隐藏递归（递归 → 不可见）
+#### 协议分发隐藏嵌套（嵌套 → 不可见）
 
 ```elixir
-# 调用者写：
 Convertible.to_native(some_nested_struct, doc)
-
-# 实际发生的递归：
-# 1. Any 实现：Map.from_struct → 对每个字段调用 to_native
-# 2. List 实现：对每个元素调用 to_native
-# 3. Map 实现：对每个值调用 to_native
-# 4. 具体类型实现：做特定转换
+# Any 实现自动递归：Map.from_struct → 对每个字段调用 to_native
+# List/Map 实现自动递归：对每个元素/值调用 to_native
 ```
 
-调用者**根本不知道这里有递归**。他看到的是一个函数调用，返回一个结果。递归被协议的多态分发完全吸收了。这是降低递归认知成本的极致形态：**消除读者感知到递归存在的必要**。
+调用者**根本不知道这里有嵌套遍历**。多层遍历被协议的多态分发完全吸收。
 
-### 技巧五：`update_in` 做路径递归（递归 → 声明式）
+#### `update_in` 声明式路径（嵌套 → 声明式）
 
 ```elixir
-# reducer.ex
-hierarchy =
-  update_in(reducer.block_hierarchy, id_path, fn current ->
-    Map.put(current, block.id, %{})
-  end)
+hierarchy = update_in(reducer.block_hierarchy, id_path, fn current ->
+  Map.put(current, block.id, %{})
+end)
 ```
 
-嵌套 map 的更新本质上是递归的（沿路径逐层深入），但 `update_in` 把它变成了声明式："在这个路径上，做这个操作"。读者不需要想"第一层打开、第二层打开、修改、第二层关上、第一层关上"。
+嵌套 map 的更新本质上是递归的，但 `update_in` 把它变成声明式："在这个路径上，做这个操作"。
 
-### 反面模式：Lexical 中难读的递归
+---
 
-为了对比，看看 Lexical 中少数需要真正递归思考的地方：
+### 反面模式：嵌套成本居高不下的地方
 
-```elixir
-# apps/common/lib/lexical/ast.ex  innermost_path/3
-defp innermost_path({form, _, args}, acc, fun) when is_atom(form) and is_list(args) do
-  case fun.({form, _, args}) do
-    true -> {:ok, [{form, _, args} | acc]}
-    false ->
-      innermost_path_args(args, [{form, _, args} | acc], fun) ||
-        innermost_path_list(args, [{form, _, args} | acc], fun)
-  end
-end
-```
+**互相递归**——symbol 树构建中 `rebuild_structure` 和 `map_block_type` 互相调用，读者必须追踪**调用图**而非单个函数。
 
-这个函数需要读者同时追踪：accumulator 在变化、两条递归分支（args 和 list）、`||` 短路语义、以及路径是如何从内到外构建的。它是 Lexical 中认知成本最高的递归之一。
+**混合 fold + 递归**——`do_collect_parents` 在 `Enum.reduce` 内部调用自身：迭代和递归的控制流交织，比任何一种单独使用都难理解。
 
-但注意：Lexical 把它**封装在 `path_at/2` 后面**，调用者永远不直接接触这个递归。
+---
 
-### 递归降级策略总结
+### 嵌套降级策略总结
 
-| 策略 | 递归被降级为 | 读者的心理模型 | 使用频率 |
-|------|------------|--------------|---------|
-| 框架吸收遍历 | 单步模拟 | "对每个节点做 X" | **最高** |
-| 多子句镜像数据结构 | 枚举 | "这几种情况各做什么" | 高 |
-| 尾递归 | 循环模拟 | "一直做直到条件不满足" | 中 |
-| 协议分发 | 不可见 | "转换这个东西"（不知道有递归） | 中 |
-| `update_in` / 路径式 | 声明式 | "在这个路径上做这个操作" | 低 |
+| | 策略 | 嵌套被降级为 | 读者的心理模型 | 使用频率 |
+|-|------|------------|--------------|---------|
+| **抽象层级** | 门面/defdelegate | 枚举 | "在一个模块中找到所有入口" | 高 |
+| | 清晰边界 | 命名预测 | "Api.complete = RPC 调用，不需要下探" | 高 |
+| | 薄编排层 | 线性模拟 | "获取 → 调用 → 包装，三步" | 高 |
+| | 封装复杂内部 | 不可见 | "调用 path_at，不管内部多复杂" | 高 |
+| | 同构层级 | 对比 | "和我已读过的 handler 形状一样" | 高 |
+| **代码递归** | 框架吸收遍历 | 单步模拟 | "对每个节点做 X" | 最高 |
+| | 多子句镜像数据 | 枚举 | "这几种情况各做什么" | 高 |
+| | 尾递归 | 循环模拟 | "一直做直到条件不满足" | 中 |
+| | 协议分发 | 不可见 | "转换这个东西" | 中 |
+| | `update_in` / 路径式 | 声明式 | "在这个路径上做这个操作" | 低 |
 
-### 递归的一句话总结
+### 嵌套的一句话总结
 
-**好的递归不是写得更聪明的递归，而是让读者不需要递归思考的递归。** 最好的递归代码，读者甚至不知道它在递归。
+**好的嵌套不是更巧妙的抽象，而是让读者停留在当前层级的嵌套。** 抽象层级嵌套靠门面、边界和同构来控制；代码递归靠框架吸收和结构映射来消解。两者共同的原则：读者不需要下探就能建立正确的心理模型。
 
 ---
 
 ## 深入分析：组合与认知负荷
 
-组合是一个二阶认知操作。它的代价来自三步：
+组合是一种结构维度。它的代价来自三步：
 1. **理解各部件**（对每个部件做模拟）
 2. **理解连接方式**（对接口做对比）
 3. **理解涌现的整体**（对组合后的行为做模拟）
@@ -447,7 +552,7 @@ end
 
 **认知效果**：读者在**任何一层**都不需要理解其他层。
 - 用户写 `deftype`：只需知道"声明字段和类型"
-- 维护者读 `deftype` 宏：只需知道"8 个子宏各做什么"（枚举）
+- 维护者读 `deftype` 宏：只需知道"6 个子宏各做什么"（枚举）
 - 维护者读 `Json.build`：只需知道"生成 Jason.Encoder 实现"
 
 每一层是一个**抽象屏障**（abstraction barrier），阻止认知负荷向上泄漏。这正是函数式编程中组合的核心价值。
@@ -480,7 +585,7 @@ Proxy 的 `gen_statem` 调用 `DrainingState.add_mfa(state, mfa)` 时，它**不
 
 同样的模式出现在 Analysis 中（组合了 AST + Document + Scopes + Comments 为一个 struct）。
 
-**认知原理**：和递归中"协议分发隐藏递归"是同一个思想——**如果组合对调用者不可见，它的认知成本就是零**。
+**认知原理**：和嵌套中"协议分发隐藏嵌套"是同一个思想——**如果组合对调用者不可见，它的认知成本就是零**。
 
 ### 技巧五：闭包组合（组合 → 单一概念）
 

@@ -1,20 +1,36 @@
 # Cognitive Load Analysis of Lexical Patterns
 
-How Lexical's codebase patterns reduce cognitive load, analyzed through five fundamental cognitive operations (from Barsalou's Perceptual Symbol Systems framework).
+How Lexical's codebase patterns reduce cognitive load, analyzed through five fundamental cognitive operations and four bridging mechanisms (from Barsalou's Perceptual Symbol Systems framework; see [cognitive-operations.md](https://github.com/scottming/scott-skills/blob/master/skills/code-design/references/cognitive-operations.md) for the full cognitive science foundation).
 
 ## The Five Cognitive Operations
 
-Ordered by cognitive cost, low to high:
+Human code reading engages three **element operations** (what the brain does with each unit of code) and two **structural dimensions** (along which axis complexity grows).
 
-| Order | Operation | What the reader does |
-|-------|-----------|---------------------|
-| First | **Enumerate** | Scan and list visible elements |
-| First | **Compare** | Find similarities/differences between two things |
-| First | **Simulate** | Mentally execute code, track state changes, predict outcomes |
-| Second | **Compose** | Assemble parts into a whole |
-| Second | **Recurse** | Apply a pattern at multiple levels of abstraction |
+```
+Element operations (cognitive cost per unit):
+  Enumerate ─── activate a concept: "what is this?"
+  Compare ───── bind to a type: "A or B?"
+  Simulate ──── run a causal chain: "if X, then what?"
 
-First-order operations are cheap. Second-order operations are expensive. **Simulate** is the most expensive first-order operation — it requires maintaining mental state, tracking control flow, and predicting side effects simultaneously.
+Structural dimensions (along which axis complexity grows):
+  Compose ───── more units at the same level (horizontal)
+  Nest ─────── deeper abstraction levels (vertical)
+```
+
+Element operations have an inherent cost gradient: **Enumerate is nearly free, Compare is cheap at close range, Simulate is expensive** (bounded by ~4 items in working memory, Cowan 2001). Structural dimensions have **no inherent cost** — their cost depends entirely on which element operations they require internally:
+
+- Good composition → reader only **enumerates** parts → low cost
+- Good nesting → reader only **compares** layer interfaces → low cost
+- Bad composition → reader must **simulate** all parts simultaneously → high cost
+- Bad nesting → reader must **simulate** multiple stack frames → high cost
+
+**Cost = element operation cost × structural complexity**, not structural complexity alone. This is why well-structured multi-layer code can be cheaper than "flat" code that forces simulation.
+
+Four **bridging mechanisms** connect these operations:
+- **Entrenchment**: repeated experience converts Simulate → Enumerate (the Nth time you see a pattern, you recognize it instead of tracing it)
+- **Pattern completion**: good composition triggers automatic predictions about unseen parts (Barsalou 2009)
+- **Isomorphism**: when nesting layers follow the same structural pattern, understanding one layer lets the reader predict the rest — pattern completion extended from horizontal to vertical (Bastos et al. 2012, Martins et al. 2015)
+- **Productivity**: Compose × Nest together produce infinite expressiveness from finite modules (Barsalou 1999)
 
 ---
 
@@ -47,7 +63,16 @@ end
 
 **Cognitive effect**: One long simulation chain becomes two short, independent ones. Reading State requires no OTP knowledge; reading GenServer requires no business logic knowledge.
 
-This is Lexical's **most frequently used technique**. ProjectNode, Proxy's three state modules (BufferingState/ProxyingState/DrainingState), and PubSub.State all follow this pattern.
+This is Lexical's **most frequently used technique** — found in **16+ GenServer/gen_statem pairs** across the codebase:
+
+| Packaging | OTP module → State module |
+|-----------|--------------------------|
+| **Separate file** | `Lexical.Server` → `Server.State`, `RemoteControl.Build` → `Build.State`, `Project.Progress` → `Progress.State`, `Project.Diagnostics` → `Diagnostics.State`, `Search.Store` → `Store.State`, `Backends.Ets` → `Ets.State`, `Plugin.Runner.Coordinator` → `Coordinator.State` |
+| **Nested in same file** | `Server.TaskQueue`, `Server.Project.Node`, `Server.Project.Intelligence`, `Document.Store`, `RemoteControl.ModuleMappings`, `RemoteControl.Commands.Reindex`, `RemoteControl.ProjectNode` |
+| **Multiple companion modules** | `RemoteControl.Api.Proxy` → `BufferingState` / `ProxyingState` / `DrainingState` |
+| **gen_event variant** | `Dispatch.PubSub` → nested `State` |
+
+The sheer scale of this pattern is significant: after a new developer encounters it 3-4 times, their brain **entrenches** a situated conceptualization — "GenServer + State = dispatch vs logic separation." From that point on, seeing `State.on_xxx(state, ...)` triggers **pattern completion** rather than simulation. The 5th, 10th, 16th instance costs nearly zero to read.
 
 ### 2. Behaviour + `use` macro — Sever "framework understanding + implementation detail" simulation
 
@@ -67,15 +92,16 @@ end
 ### 3. `with` linear pipeline — Eliminate branch simulation
 
 ```elixir
-def snipe(%Setup{} = setup) do
-  with {:ok, prepared} <- Transaction.prepare(setup),
-       {:ok, result}   <- Submission.execute(prepared, setup) do
-    {:ok, result}
+# apps/server/lib/lexical/server.ex
+def handle_message(%_{} = request, %State{} = state) do
+  with {:ok, handler} <- fetch_handler(request),
+       {:ok, req} <- Convert.to_native(request) do
+    TaskQueue.add(request.id, {handler, :handle, [req, state.configuration]})
   end
 end
 ```
 
-The reader's simulation path is **linear**: step1 → step2 → done. No need to maintain a branch tree in working memory. Each step's name (`Transaction.prepare`, `Submission.execute`) tells **what** it does — no need to expand the function body to simulate **how**.
+The reader's simulation path is **linear**: step1 → step2 → done. No need to maintain a branch tree in working memory. Each step's name (`fetch_handler`, `Convert.to_native`) tells **what** it does — no need to expand the function body to simulate **how**.
 
 ---
 
@@ -132,16 +158,17 @@ end
 ### `%Struct{} = param` — Type comparison at the signature
 
 ```elixir
-def prepare(%Setup{} = setup) do ...
+# apps/remote_control/lib/lexical/remote_control/code_intelligence/entity.ex
+def resolve(%Analysis{} = analysis, %Position{} = position) do ...
 ```
 
-The reader doesn't need to enter the function body and simulate data flow to confirm input type. At the signature: expected Setup, receiving Setup? Done. One **comparison** at the call site, zero **simulation** required.
+The reader doesn't need to enter the function body and simulate data flow to confirm input types. At the signature: expected Analysis and Position, receiving the right types? Done. One **comparison** at the call site, zero **simulation** required.
 
 ---
 
-## Higher-Order Operations: Compose and Recurse
+## Higher-Order Operations: Compose and Nest
 
-Lexical handles second-order operations more subtly, and uses them less frequently:
+Lexical handles structural dimensions more subtly. A brief overview of two representative examples (see deep dives below for full treatment):
 
 ### Compose — Proto DSL's layered macro design
 
@@ -152,7 +179,7 @@ defrequest = deftype + Message.build + Jason.Encoder
 
 Each layer only needs to understand its own input/output, not the other layers' implementations. The composition cost is **encapsulated** inside macros — the user sees a single `deftype [name: string(), ...]`.
 
-### Recurse — Convertible protocol's automatic recursion
+### Nest — Convertible protocol's automatic nesting traversal
 
 ```elixir
 # Any fallback recursively converts struct fields
@@ -161,19 +188,24 @@ def to_native(%_struct{} = struct, context_document) do
 end
 ```
 
-The reader doesn't need to think recursively — the protocol framework recurses for them. Recursive cognitive load is absorbed by the framework, leaving the reader with a flat mental model.
+The reader doesn't need to think about nesting depth — the protocol framework traverses for them. Nesting cognitive load is absorbed by the framework, leaving the reader with a flat mental model.
 
 ---
 
 ## Summary
 
-| Cognitive Operation | Lexical's Reduction Strategy | Frequency |
-|--------------------|------------------------------|-----------|
-| **Simulate** | Separate pure from impure (State Module, Detection, `with` pipelines) | **Highest** |
-| **Enumerate** | Colocate at single site (@handlers, @enforce_keys, @impl) | High |
-| **Compare** | Uniform interfaces (Protocol, Behaviour, type in signatures) | Medium |
-| **Compose** | Encapsulate in macros; users see declarative API (Proto DSL) | Low |
-| **Recurse** | Framework recurses automatically; users think flat (Convertible Any) | Low |
+| Element Operation | Lexical's Reduction Strategy | Frequency | Entrenchment effect |
+|--------------------|------------------------------|-----------|-------------------|
+| **Simulate** | Separate pure from impure (State Module, Detection, `with` pipelines) | **Highest** | 16+ State pairs → pattern completion after ~3 exposures |
+| **Enumerate** | Colocate at single site (@handlers, @enforce_keys, @impl) | High | Consistent registry pattern → "look for @-list" becomes automatic |
+| **Compare** | Uniform interfaces (Protocol, Behaviour, type in signatures) | Medium | 14 Detection modules, 10 provider handlers → shape becomes familiar |
+
+| Structural Dimension | Lexical's Reduction Strategy | Frequency | Entrenchment effect |
+|----------------------|------------------------------|-----------|-------------------|
+| **Compose** | Flat lists, pipelines, layered macros, transparent encapsulation, closures (see deep dive) | High | Proto DSL vocabulary entrenches across 50+ protocol types |
+| **Nest** | Facades, clean boundaries, thin orchestrators, encapsulation, isomorphism, framework traversal (see deep dive) | High | 16+ State pairs + 10 handler isomorphisms → pattern completion |
+
+**Frequency matters because of entrenchment**: high-frequency patterns get fixed deeper in the reader's long-term memory (Chase & Simon 1973). The first time a developer encounters Nested State Module, they must Simulate to understand the separation. By the 4th time, they Enumerate — "ah, this is the State Module pattern." This is why Lexical's most impactful patterns are also its most frequent ones.
 
 ### The one-sentence takeaway
 
@@ -181,13 +213,255 @@ The reader doesn't need to think recursively — the protocol framework recurses
 
 ---
 
-## Deep Dive: Recursion and Cognitive Load
+## Cross-cutting: Pattern Completion and Isomorphism
 
-Recursion is the most expensive cognitive operation because readers must **hold multiple stack frames in working memory simultaneously** — simulating "a simulation," a second-order operation. Lexical's strategy: **downgrade recursion to a cheaper cognitive operation** so the reader never thinks recursively.
+Beyond reducing individual operations, Lexical's most powerful cognitive strategy operates at the **codebase level**: maintaining pattern consistency so that readers' brains do **pattern completion** — automatically predicting unseen code from seen parts.
 
-### Technique 1: Framework absorbs traversal (Recurse → Single-step simulate)
+In Barsalou's (2009) framework: when a situated conceptualization becomes entrenched, perceiving *part* of the pattern activates the rest as predictions. The reader's brain fills in what it hasn't seen yet.
 
-The most frequently used recursion pattern in Lexical. The reader's mental model is "do X for each node," not "recursively traverse a tree."
+### Structural consistency as pattern completion (horizontal isomorphism)
+
+When multiple modules at the **same abstraction level** follow the same structural pattern, the reader understands one and predicts the rest. This is **isomorphism within a tier** — it reduces both composition cost (cheaper to enumerate) and nesting cost (no need to descend into each implementation to understand its shape).
+
+| Pattern | Instances | Shared structure | What the reader predicts after seeing 3+ |
+|---------|-----------|-----------------|----------------------------------------|
+| Nested State Module | 16+ | Pure state transforms separate from OTP dispatch | "State module = pure transforms, GenServer = thin dispatch" |
+| Detection behaviour | 14 modules | `use Detection` + `@impl` + `detected?/2` | "detector = walk AST → check position match" |
+| Provider handlers | 10 modules | `handle/2` → `{:reply, response}` | "handler = match request → call intelligence → build response" |
+| Code action handlers | 5 modules | `@behaviour Handler` + `actions/3` + `kinds/0` | "handler = filter by kind → find applicable actions" |
+| Document compilers | 5 modules | `recognizes?/1` + `compile/1` + `enabled?/0` | "compiler = check language → compile document" |
+| Indexer extractors | 9 modules | `extract/2` → `{:ok, entry}` / `:ignored` | "extractor = pattern match AST → produce entry" |
+
+Martins et al. (2015) experimentally confirmed that self-similar hierarchical structures activate the **Default Mode Network**, producing compressed internal rule representations that dramatically reduce processing load. Non-self-similar structures activate the **Fronto-Parietal Control Network**, requiring independent processing of each level. Lexical's isomorphic patterns within each tier exploit the DMN path.
+
+### Contrast: heterogeneous nesting across tiers
+
+Lexical's LSP request pipeline crosses ~6 conceptual layers, each with a **different** structural pattern:
+
+```
+Transport (byte I/O) → Server (OTP routing) → Convert (struct mapping) →
+TaskQueue (async scheduling) → Handler (domain dispatch) → CodeIntelligence (business logic)
+```
+
+The reader must build an independent model for each layer — no cross-layer prediction via isomorphism. This heterogeneous cost is inherent to the problem (transport ≠ routing ≠ conversion ≠ scheduling ≠ business logic), but Lexical mitigates it through **accurate naming at each boundary**: `StdIO`, `Convert.to_native`, `TaskQueue.add`, `handler.handle` — each name creates a high-precision prediction that prevents the reader from needing to descend.
+
+### Naming conventions as pattern completion triggers
+
+Lexical uses function prefixes that create predictions about behavior:
+
+| Prefix | Reader predicts | Accuracy in Lexical |
+|--------|----------------|-------------------|
+| `fetch_*` | Retrieval, may fail with `{:ok, _}` / `{:error, _}` | High — consistent across `common` and `remote_control` |
+| `ensure_*` | Side-effectful setup (filesystem, apps, compatibility) | High — always involves I/O |
+| `to_*` / `from_*` | Shape conversion between representations | High — dominant in `protocol` |
+| `do_*` | Private implementation / recursion body | High — always `defp` |
+| `maybe_*` | Conditional operation, soft failure | High |
+| `on_*` | Event reaction / state transition | **Medium** — see Precision Weighting below |
+| `resolve_*` | Semantic resolution (aliases, modules, entities) | High — concentrated in `remote_control` |
+
+When a developer has entrenched these conventions, seeing `fetch_` at the start of a function name activates an immediate prediction: "this retrieves data and might return an error tuple." No need to read the body — pattern completion handles it.
+
+### The pipeline as situated conceptualization
+
+Lexical's LSP request handling follows a consistent path:
+
+```
+incoming message → Convert.to_native → fetch_handler → Handler.handle(request, config) → response
+```
+
+After working with Lexical for a few days, this pipeline becomes an entrenched situated conceptualization. Seeing `Convert.to_native` at the start of a handler triggers pattern completion for the entire flow — the developer predicts `fetch_handler` and `Handler.handle` without reading further.
+
+---
+
+## Precision Weighting: When Names Create Wrong Predictions
+
+Not all naming failures are equal. Friston (2010) showed that the brain assigns **precision** (confidence) to predictions. A precise name creates a high-precision prediction; violating it costs more than violating a vague prediction. In code: a misleading name is worse than a vague name because the reader builds a *confident wrong model* that must be dismantled.
+
+### Consistency violations found in Lexical
+
+Lexical's naming is highly consistent, but the few violations are instructive:
+
+**1. `on_*` is not always a pure state transition.**
+
+`Build.State.on_timeout` does file cleanup via `ensure_build_directory`; `Configuration.on_change` writes to `persistent_term`. A reader who entrenched "`on_*` = pure reducer" from `ProjectNode.State.on_nodeup` will hit a prediction error when they encounter these. The cost is double: discard the wrong model, then re-simulate.
+
+**2. Detection outliers break the `use Detection` pattern.**
+
+14 of 17 detection modules follow `use Detection` + `@impl Detection` + `detected?/2`. But `Comment` and `StructFieldValue` implement `detected?/2` without `use Detection` or `@behaviour`. `ModuleAttribute` has a 3-argument variant via `env.ex`. A reader who entrenched "all detection modules use the behaviour" will be surprised.
+
+**3. `@impl` inconsistency in document compilers.**
+
+`elixir.ex`, `config.ex`, `eex.ex` use `@impl true` on callbacks. `heex.ex` declares `@behaviour Compiler` but omits `@impl`. The reader who uses `@impl` to enumerate callbacks will miss HEEx's implementations.
+
+**4. `@extractors` is not the complete set.**
+
+`Reducer`'s default `@extractors` contains 7 modules. `Variable` and `ExUnit` extractors exist but are composed elsewhere. A reader inferring "default reducer = complete indexing" will build a wrong model.
+
+**5. Dispatch handler inventory is smaller than the pattern suggests.**
+
+The `Dispatch.Handler` behaviour and macro suggest many handler modules, but only `Handlers.Indexing` is a domain handler (plus `PubSub`). The infrastructure implies more scale than exists.
+
+**6. Translatable file naming breaks file-name-to-type heuristic.**
+
+`Candidate.Struct`'s `Translatable` implementation lives in `module_or_behaviour.ex`, not `struct.ex`. A reader using "file name = type = defimpl home" will look in the wrong file.
+
+### Naming cost model
+
+| Name quality | Precision | If accurate | If wrong |
+|-------------|-----------|-------------|----------|
+| Good name (`fetch_docs`) | High | Enumerate — near zero cost | Catastrophic — discard confident model, re-simulate |
+| Vague name (`process`) | Low | Simulate — must read body | Moderate — no wrong expectations to discard |
+| Misleading name (`validate` that mutates) | High | N/A | Worst case — confident wrong model, discovered late |
+
+**Takeaway for Lexical**: the few violations above are low-severity because they are rare — the overwhelming consistency builds correct high-precision predictions. But each violation is a candidate for cleanup because its cognitive cost is disproportionate to its frequency.
+
+---
+
+## Productivity: Where Compose × Nest Intersect
+
+Barsalou (1999) identifies **productivity** as the ability to generate infinite combinations from finite elements — arising from integrating elements "combinatorially and recursively." In Lexical, the Proto DSL is the clearest example:
+
+```
+Layer 0: deftype                      ← user writes ONE line (Nest: level 0)
+Layer 1: Json + Inspect + Access +    ← 6 macros side by side (Compose: horizontal)
+         Struct + Parse + Meta
+Layer 2: each sub-macro's internals   ← independent concerns (Nest: level 2)
+
+One layer up:
+Layer 0: defrequest                   ← user writes ONE line (Nest: level 0)
+Layer 1: Message.build + deftype      ← reuses deftype (Compose: horizontal)
+Layer 2: Message internals + ...      ← (Nest: level 2)
+```
+
+Composition alone would produce flat lists of macros. Nesting alone would produce deep single-concern chains. Together, they produce the full expressiveness of Lexical's protocol type system: **50+ LSP types defined from a handful of composable macros at 3 abstraction levels.** One-line `deftype` declarations generate complete struct definitions with JSON encoding, inspection, access protocol, parsing, and metadata — without the user needing to understand any of those concerns.
+
+This is what productivity means in practice: the ability to express new LSP protocol types without architectural changes.
+
+---
+
+## Deep Dive: Nesting and Cognitive Load
+
+Nesting is the most expensive structural dimension because readers must **hold multiple abstraction levels in working memory simultaneously** — bounded by ~4 levels (Cowan 2001).
+
+In code, nesting has two major manifestations:
+
+- **Abstraction layer nesting**: module A calls module B calls module C… The reader must jump across multiple files to understand a business operation. This is the most common form of nesting in day-to-day development.
+- **Code recursion**: a function calls itself; the reader must hold multiple stack frames mentally. Less frequent but extremely high cognitive cost.
+
+Lexical's strategy: **downgrade nesting to a cheaper cognitive operation** so the reader stays at the current level, predicting the rest through naming, boundaries, or isomorphism.
+
+---
+
+### Part 1: Abstraction Layer Nesting
+
+Lexical's LSP completion pipeline traverses ~15 modules from stdin to result (StdIO → Server → JsonRpc → Convert → TaskQueue → Handler → CodeIntelligence → Env → Api → erpc → RemoteControl → Completion → …return… → Translatable → Convert → Transport). If readers had to understand all layers simultaneously, the cognitive cost would be unmanageable.
+
+#### Facade collapses entry points (Nest → Enumerate)
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control.ex — 22 defdelegate calls
+defdelegate compile_document(project, document), to: Api.Proxy
+defdelegate complete(env), to: RemoteControl.Completion
+defdelegate resolve_entity(analysis, position), to: CodeIntelligence.Entity
+defdelegate broadcast(message), to: Dispatch
+# ... 22 total
+```
+
+`RemoteControl` is the remote application's facade — callers need to know only one module, not the dozen internal modules behind it (Proxy, Dispatch, Completion, CodeIntelligence, etc.). Nesting depth collapses from "search N modules for the target function" to "enumerate one module."
+
+Same pattern: `Transport` uses `defdelegate write(message), to: @implementation` to hide the transport implementation (StdIO vs NoOp) behind compile-time configuration.
+
+#### Clean boundaries prevent descent (Nest → Naming prediction)
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/api.ex
+def complete(%Project{} = project, %Env{} = env) do
+  RemoteControl.call(project, RemoteControl, :complete, [env])
+end
+
+def resolve_entity(%Project{} = project, %Analysis{} = analysis, %Position{} = position) do
+  RemoteControl.call(project, RemoteControl, :resolve_entity, [analysis, position])
+end
+```
+
+`RemoteControl.Api` is the RPC boundary between manager and project nodes. Every function is a one-liner `RemoteControl.call`. When readers see `Api.complete(project, env)`, the signature `(%Project{}, %Env{})` is a complete understanding — "execute completion on the remote node with this project and environment." **No descent needed.**
+
+The boundary's value isn't just encapsulation — it **prevents cognitive leakage**: server-side code never needs to understand the remote node's internal structure.
+
+#### Thin orchestrator only dispatches (Nest → Linear simulate)
+
+```elixir
+# apps/server/lib/lexical/server/provider/handlers/completion.ex
+def handle(%Requests.Completion{} = request, %Configuration{} = config) do
+  completions =
+    CodeIntelligence.Completion.complete(
+      config.project,
+      document_analysis(request.document, request.position),
+      request.position,
+      request.context || Completion.Context.new(trigger_kind: :invoked)
+    )
+
+  response = Responses.Completion.new(request.id, completions)
+  {:reply, response}
+end
+```
+
+The handler is a three-step linear pipeline: get analysis → call intelligence → wrap response. The reader doesn't need to descend into `CodeIntelligence.Completion` to understand what this layer does. Each step's name (`document_analysis`, `Completion.complete`, `Responses.Completion.new`) creates a sufficiently precise prediction.
+
+#### Encapsulate complex internals behind simple API (Nest → Invisible)
+
+```elixir
+# apps/common/lib/lexical/ast.ex
+# Public API: clean {:ok, path} | {:error, _}
+def path_at(%Analysis{} = analysis, %Position{} = position) do
+  with {:ok, ast, _} <- from(analysis) do
+    path_at(ast, position)
+  end
+end
+
+# Internal: the highest cognitive cost recursion in Lexical (dual branches + accumulator + || short-circuit)
+defp innermost_path({form, _, args}, acc, fun) when is_atom(form) and is_list(args) do
+  case fun.({form, _, args}) do
+    true -> {:ok, [{form, _, args} | acc]}
+    false ->
+      innermost_path_args(args, [{form, _, args} | acc], fun) ||
+        innermost_path_list(args, [{form, _, args} | acc], fun)
+  end
+end
+```
+
+Callers never touch `innermost_path/3`. Same pattern: `Env.new/3` hides the combination of 13+ Detection modules, `CodeIntelligence.Completion.complete/4` hides the full filtering/translation/building pipeline.
+
+General principle: **complexity can exist, but must be encapsulated behind a public API rather than leaking to callers.**
+
+#### Isomorphic layers (Nest → Compare)
+
+When multiple modules at the **same tier** follow the same structural pattern, understanding one predicts the rest — downgrading nesting from simulation to comparison. Martins et al. (2015) showed self-similar structures activate the **Default Mode Network** (compressed rule representations), while non-self-similar structures activate the costly **Fronto-Parietal Control Network**.
+
+Lexical's clearest isomorphism: all 10 LSP handler modules follow `handle/2` → call intelligence → `{:reply, response}`. After reading `Handlers.Completion`, readers predict `Handlers.Hover`, `Handlers.GoToDefinition`, etc. without descending — **parameter substitution on a known pattern**, not fresh simulation.
+
+This extends to other tiers: code action handlers (5 with `actions/3` + `kinds/0`), document compilers (5 with `recognizes?/1` + `compile/1` + `enabled?/0`), indexer extractors (9 with `extract/2`).
+
+#### Contrast: heterogeneous nesting across tiers
+
+Lexical's LSP request pipeline crosses ~6 conceptual layers, each with a **different** structural pattern:
+
+```
+Transport (byte I/O) → Server (OTP routing) → Convert (struct mapping) →
+TaskQueue (async scheduling) → Handler (domain dispatch) → CodeIntelligence (business logic)
+```
+
+The reader must build an independent model for each layer — no cross-layer prediction via isomorphism. This heterogeneous cost is inherent (transport ≠ routing ≠ conversion ≠ scheduling ≠ business logic), but Lexical mitigates it through **accurate naming at each boundary**: `StdIO`, `Convert.to_native`, `TaskQueue.add`, `handler.handle` — each name creates a high-precision prediction that prevents descent.
+
+---
+
+### Part 2: Code Recursion — A Special Form of Nesting
+
+Code recursion is nesting where a function calls itself; readers must hold multiple stack frames mentally. Lexical's strategy: downgrade recursion so readers **don't think recursively about recursive code**.
+
+#### Framework absorbs traversal (Nest → Single-step simulate)
+
+The most frequently used recursion pattern. The reader's mental model is "do X for each node," not "recursively traverse a tree."
 
 ```elixir
 # apps/common/lib/lexical/ast/detection/string.ex
@@ -201,139 +475,103 @@ defp detect_string(paths, %Position{} = position) do
 end
 ```
 
-The callback processes **one node**. `Macro.postwalk` handles all traversal logic. This is the same principle as Nested State Module — **sever the simulation chain** by splitting "how to traverse" from "what to do at each step."
+The callback processes **one node**. `Macro.postwalk` handles all traversal — **severing the simulation chain** by splitting "how to traverse" from "what to do at each step."
 
 | Framework | Reader's mental model | Usage |
 |-----------|----------------------|-------|
-| `Macro.prewalk` | "Do X for each node top-down" | analysis.ex, variable.ex, quoted.ex |
-| `Macro.postwalk` | "Do X for each node bottom-up" | string.ex |
+| `Macro.prewalk` | "Do X for each node top-down" | analysis.ex, variable.ex, quoted.ex, ecto_schema.ex, function_definition.ex, wal.ex |
+| `Macro.postwalk` | "Do X for each node bottom-up" | string.ex, namespace/configs.ex |
 | `Macro.traverse` | "Do X on enter, Y on leave" | analysis.ex, error.ex |
-| `Zipper.traverse` | "Do X for each node in range" | ast.ex `traverse_in/4` |
-| `Zipper.find` | "Find first node matching P" | remove_unused_alias.ex |
+| `Zipper.traverse_while` | "Do X for each node in range" | ast.ex `traverse_in/4` |
+| `Zipper.find` | "Find first node matching P" | remove_unused_alias.ex, entity.ex, ast.ex |
 | Protocol dispatch | "Convert this thing" | convertible.ex |
 
-### Technique 2: Multi-clause mirrors data shape (Recurse → Enumerate)
+#### Multi-clause mirrors data shape (Nest → Enumerate)
 
 ```elixir
 # apps/common/lib/future/code/typespec.ex
 defp collect_vars({:type, _anno, _kind, args}) when is_list(args) do
   Enum.flat_map(args, &collect_vars/1)        # type with children → expand
 end
-
-defp collect_vars({:paren_type, _anno, [type]}) do
-  collect_vars(type)                           # parentheses → unwrap
-end
-
-defp collect_vars({:var, _anno, var}) do
-  [erl_to_ex_var(var)]                         # variable → collect (base case)
-end
-
-defp collect_vars(_) do
-  []                                           # anything else → ignore (base case)
-end
+defp collect_vars({:paren_type, _anno, [type]}), do: collect_vars(type)  # parentheses → unwrap
+defp collect_vars({:var, _anno, var}), do: [erl_to_ex_var(var)]          # variable → collect
+defp collect_vars(_), do: []                                             # anything else → ignore
 ```
 
-The reader's mental model is not "recursively walk a type tree" but **"enumerate four cases"**:
-1. Type with children → expand
-2. Parentheses → unwrap
-3. Variable → collect
-4. Other → ignore
+The reader's mental model is **"enumerate four cases"**, not "recursively walk a type tree." Structural recursion — the clause structure mirrors the data structure. `Enum.flat_map` presents recursion as **iteration**.
 
-Each clause is independently readable. This is **structural recursion** — the function's clause structure mirrors the data structure, one-to-one. The `Enum.flat_map(args, &collect_vars/1)` expression is especially important: it presents "recurse on each element" as "flat_map over a list" — the reader sees **iteration**, not recursion.
-
-### Technique 3: Tail recursion disguised as loop (Recurse → Loop simulate)
+#### Tail recursion disguised as loop (Nest → Loop simulate)
 
 ```elixir
 # apps/remote_control/lib/lexical/remote_control/search/indexer/source/reducer.ex
 defp maybe_pop_block(%__MODULE__{} = reducer) do
   if block_ended?(reducer) do
-    reducer
-    |> pop_block()
-    |> maybe_pop_block()   # tail recursion
+    reducer |> pop_block() |> maybe_pop_block()
   else
     reducer
   end
 end
 ```
 
-The reader's mental model is a **while loop**: "keep popping blocks until no more blocks have ended." No need to hold multiple stack frames — there's only one `reducer` evolving over time.
+The reader's mental model is a **while loop**: "keep popping blocks until no more have ended." No multiple stack frames — just one `reducer` evolving over time.
 
-Key detail: **condition, transformation, and recursion** are split into three independent concerns:
-- `block_ended?` — pure predicate, no state change
-- `pop_block` — pure transformation, no branching or recursion
-- `maybe_pop_block` — skeleton: check → transform → recurse
-
-### Technique 4: Protocol dispatch hides recursion (Recurse → Invisible)
+#### Protocol dispatch hides nesting (Nest → Invisible)
 
 ```elixir
-# What the caller writes:
 Convertible.to_native(some_nested_struct, doc)
-
-# What actually happens:
-# 1. Any impl: Map.from_struct → call to_native on each field
-# 2. List impl: call to_native on each element
-# 3. Map impl: call to_native on each value
-# 4. Specific impl: do type-specific conversion
+# Any impl auto-recurses: Map.from_struct → call to_native on each field
+# List/Map impls auto-recurse: call to_native on each element/value
 ```
 
-The caller **doesn't know recursion exists**. They see one function call returning one result. The recursion is fully absorbed by protocol polymorphic dispatch. This is the ultimate form of cognitive cost reduction: **eliminate the reader's awareness that recursion is happening**.
+The caller **doesn't know nesting exists**. Multi-level traversal is fully absorbed by protocol polymorphic dispatch.
 
-### Technique 5: `update_in` with dynamic path (Recurse → Declarative)
+#### `update_in` with dynamic path (Nest → Declarative)
 
 ```elixir
-# reducer.ex
-hierarchy =
-  update_in(reducer.block_hierarchy, id_path, fn current ->
-    Map.put(current, block.id, %{})
-  end)
+hierarchy = update_in(reducer.block_hierarchy, id_path, fn current ->
+  Map.put(current, block.id, %{})
+end)
 ```
 
-Updating a nested map is inherently recursive (descend layer by layer along the path), but `update_in` makes it declarative: "at this path, do this operation." The reader doesn't need to think "open layer 1, open layer 2, modify, close layer 2, close layer 1."
+Nested map update is inherently recursive, but `update_in` makes it declarative: "at this path, do this operation."
 
-### Anti-pattern: When recursion stays recursive
+---
 
-For contrast, one of Lexical's few places requiring genuine recursive thinking:
+### Anti-patterns: When nesting stays expensive
 
-```elixir
-# apps/common/lib/lexical/ast.ex  innermost_path/3
-defp innermost_path({form, _, args}, acc, fun) when is_atom(form) and is_list(args) do
-  case fun.({form, _, args}) do
-    true -> {:ok, [{form, _, args} | acc]}
-    false ->
-      innermost_path_args(args, [{form, _, args} | acc], fun) ||
-        innermost_path_list(args, [{form, _, args} | acc], fun)
-  end
-end
-```
+**Mutual recursion** — `rebuild_structure` and `map_block_type` in symbol tree building call each other; the reader must track a **call graph**, not a single function.
 
-This requires tracking: accumulator mutation, two recursive branches (args and list), `||` short-circuit semantics, and how the path builds inside-out. It's the highest cognitive cost recursion in Lexical.
+**Mixed fold + recursion** — `do_collect_parents` calls itself inside `Enum.reduce`: iteration and recursion control flows interleave, harder than either alone.
 
-But note: Lexical **encapsulates it behind `path_at/2`**, so callers never touch this recursion directly.
+### Nesting reduction summary
 
-### Recursion reduction summary
+| | Strategy | Nesting downgraded to | Reader's mental model | Frequency |
+|-|----------|----------------------|----------------------|-----------|
+| **Abstraction layers** | Facade / defdelegate | Enumerate | "Find all entries in one module" | High |
+| | Clean boundaries | Naming prediction | "Api.complete = RPC call, no descent" | High |
+| | Thin orchestrator | Linear simulate | "get → call → wrap, three steps" | High |
+| | Encapsulate internals | Invisible | "Call path_at, ignore internal complexity" | High |
+| | Isomorphic layers | Compare | "Same shape as the handler I already read" | High |
+| **Code recursion** | Framework absorbs traversal | Single-step simulate | "Do X for each node" | Highest |
+| | Multi-clause mirrors data | Enumerate | "These N cases do what" | High |
+| | Tail recursion | Loop simulate | "Keep doing until done" | Medium |
+| | Protocol dispatch | Invisible | "Convert this thing" | Medium |
+| | `update_in` / path-based | Declarative | "At this path, do this" | Low |
 
-| Strategy | Recursion downgraded to | Reader's mental model | Frequency |
-|----------|------------------------|----------------------|-----------|
-| Framework absorbs traversal | Single-step simulate | "Do X for each node" | **Highest** |
-| Multi-clause mirrors data | Enumerate | "These N cases do what" | High |
-| Tail recursion | Loop simulate | "Keep doing until done" | Medium |
-| Protocol dispatch | Invisible | "Convert this thing" | Medium |
-| `update_in` / path-based | Declarative | "At this path, do this" | Low |
+### The one-sentence takeaway on nesting
 
-### The one-sentence takeaway on recursion
-
-**Good recursion is not cleverer recursion — it's recursion that the reader doesn't need to think about recursively.** The best recursive code is code where the reader doesn't even know it's recursing.
+**Good nesting is not cleverer abstraction — it's nesting that lets readers stay at the current level.** Abstraction layer nesting is controlled through facades, boundaries, and isomorphism; code recursion is dissolved through framework absorption and structural mapping. The shared principle: the reader doesn't need to descend to build a correct mental model.
 
 ---
 
 ## Deep Dive: Composition and Cognitive Load
 
-Composition is a second-order cognitive operation. Its cost comes from three steps:
+Composition is a structural dimension. Its cost comes from three steps:
 1. **Understand each part** (simulate each part)
 2. **Understand the connections** (compare interfaces)
 3. **Understand the emergent whole** (simulate the combined behavior)
 
-Step 3 is the killer. If you must **understand all parts simultaneously** to understand the whole, cognitive cost is multiplicative. Lexical's strategy: **let readers understand each part independently, then understand the whole through cheap operations** (enumerate, compare, linear simulate).
+Step 3 is the killer. If you must **understand all parts simultaneously** to understand the whole, cognitive cost is multiplicative (element interactivity in Sweller's terms). Lexical's strategy: **let readers understand each part independently, then understand the whole through cheap operations** (enumerate, compare, linear simulate).
 
 ### Technique 1: Flat composition (Compose → Enumerate)
 
@@ -371,6 +609,42 @@ end
 ```
 
 **Cognitive formula**: cost of understanding the whole = Σ(cost of each part) + enumeration cost, NOT Π(cost of each part).
+
+**Variations on flat composition:**
+
+**Map-based registry** — flat composition over a map instead of a list:
+
+```elixir
+# apps/common/lib/lexical/ast/env.ex
+@detectors %{
+  alias: Detection.Alias,
+  import: Detection.Import,
+  pipe: Detection.Pipe,
+  # ... 12+ context → detector mappings
+}
+```
+
+Unlike `@handlers` (iterate all, merge results), `@detectors` evaluates **every** detector up front and builds a context map. The reader still enumerates, but the mental model is "registry lookup" rather than "fan-out and merge."
+
+**Stateful sequential pipeline** — ordered application with shared state:
+
+```elixir
+# apps/remote_control/lib/lexical/remote_control/search/indexer/source/reducer.ex
+@extractors [
+  Extractors.FunctionDefinition,
+  Extractors.Module,
+  Extractors.ModuleAttribute,
+  # ...
+]
+
+def apply_extractors(%__MODULE__{} = reducer, elem) do
+  Enum.reduce(@extractors, {reducer, elem}, fn extractor, {reducer, elem} ->
+    # each extractor can modify reducer state
+  end)
+end
+```
+
+Unlike independent `flat_map`, extractors run in order and share reducer state. The reader still enumerates the list, but must understand that **order and shared state matter** — slightly higher cognitive load than pure flat composition.
 
 ### Technique 2: Pipeline composition (Compose → Linear simulate)
 
@@ -443,7 +717,7 @@ end
 
 **Cognitive effect**: the reader at **any layer** doesn't need to understand other layers.
 - User writing `deftype`: only needs "declare fields and types"
-- Maintainer reading `deftype` macro: only needs "8 sub-macros, each does what" (enumerate)
+- Maintainer reading `deftype` macro: only needs "6 sub-macros, each does what" (enumerate)
 - Maintainer reading `Json.build`: only needs "generate Jason.Encoder implementation"
 
 Each layer is an **abstraction barrier** that prevents cognitive load from leaking upward. This is the core value of composition in functional programming.
@@ -474,9 +748,12 @@ end
 
 When Proxy's `gen_statem` calls `DrainingState.add_mfa(state, mfa)`, it **doesn't know** BufferingState is doing the work underneath. The composition is encapsulated behind DrainingState's interface.
 
-The same pattern appears in Analysis (composing AST + Document + Scopes + Comments into one struct).
+The same pattern appears in:
+- Analysis (composing AST + Document + Scopes + Comments into one struct)
+- `RemoteControl` facade (`defdelegate` to Proxy, CodeAction, Completion, etc.)
+- `Transport` (`defdelegate write(message), to: @implementation` where `@implementation` is compile-time configured)
 
-**Cognitive principle**: same as "protocol dispatch hides recursion" — **if composition is invisible to the caller, its cognitive cost is zero**.
+**Cognitive principle**: same as "protocol dispatch hides nesting" — **if composition is invisible to the caller, its cognitive cost is zero**.
 
 ### Technique 5: Closure composition (Compose → Single concept)
 
@@ -520,11 +797,12 @@ The caller doesn't need to understand the progress system's internals (broadcast
 
 | Strategy | Composition downgraded to | Reader's mental model | Use case |
 |----------|--------------------------|----------------------|----------|
-| Flat composition | Enumerate | "N independent parts, merged results" | @handlers, @compilers |
+| Flat composition | Enumerate | "N independent parts, merged results" | @handlers, @compilers, @detectors |
+| Stateful pipeline | Linear simulate (with shared state) | "Extractors run in order, building up results" | @extractors + Reducer |
 | Pipeline composition | Linear simulate | "Data flows through a series of transforms" | `with` chains, `\|>` pipes, Enum chains |
 | Layered composition | Layer-by-layer simulate | "This layer does X, don't care how layers below work" | Proto DSL, macro systems |
-| Transparent composition | Invisible | "Call this module" (unaware of internal composition) | DrainingState, Analysis |
-| Closure composition | Single concept | "Call this function" | Progress, resource management |
+| Transparent composition | Invisible | "Call this module" (unaware of internal composition) | DrainingState, Analysis, Transport, RemoteControl facade |
+| Closure composition | Single concept | "Call this function" | Progress, resource management, formatter wrapping |
 
 ### The one-sentence takeaway on composition
 
